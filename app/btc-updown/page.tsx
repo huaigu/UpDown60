@@ -41,10 +41,20 @@ const SEPOLIA_CONFIG = {
   rpcUrls: ['https://sepolia.infura.io/v3/'],
   blockExplorerUrls: ['https://sepolia.etherscan.io/'],
 };
+const STAKE_ETH = '0.01';
+const LOCAL_SUBMISSIONS_KEY = 'btcUpDownLocalSubmissions';
 
 const formatAddress = (value: string) => {
   if (!value) return '';
   return `${value.slice(0, 6)}...${value.slice(-4)}`;
+};
+
+type LocalSubmission = {
+  id: string;
+  roundId: number;
+  direction: 'up' | 'down';
+  timestamp: number;
+  address?: string;
 };
 
 export default function BtcUpDownPage() {
@@ -62,7 +72,16 @@ export default function BtcUpDownPage() {
   const [isInitializing, setIsInitializing] = useState(false);
   const [isSwitchingNetwork, setIsSwitchingNetwork] = useState(false);
   const [networkError, setNetworkError] = useState('');
+  const [localSubmissions, setLocalSubmissions] = useState<LocalSubmission[]>([]);
+  const [blockTimestamp, setBlockTimestamp] = useState<number | null>(null);
+  const [blockFetchedAt, setBlockFetchedAt] = useState<number | null>(null);
+  const [clientNow, setClientNow] = useState(Date.now());
   const isOnSepolia = chainId === SEPOLIA_CHAIN_ID;
+  const totalsRevealed = false;
+  const poolValueText = totalsRevealed ? '14.5 ETH' : 'Pending reveal';
+  const upOddsLabel = totalsRevealed ? '1.85x Payout' : 'Pending reveal';
+  const downOddsLabel = totalsRevealed ? '2.10x Payout' : 'Pending reveal';
+  const pendingRevealClass = totalsRevealed ? '' : 'font-black uppercase';
 
   useEffect(() => {
     document.body.classList.add('btc-updown-body');
@@ -70,6 +89,58 @@ export default function BtcUpDownPage() {
       document.body.classList.remove('btc-updown-body');
     };
   }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const stored = window.localStorage.getItem(LOCAL_SUBMISSIONS_KEY);
+    if (!stored) return;
+    try {
+      const parsed = JSON.parse(stored) as LocalSubmission[];
+      if (Array.isArray(parsed)) {
+        setLocalSubmissions(parsed);
+      }
+    } catch (err) {
+      console.warn('Failed to parse local submissions cache', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(LOCAL_SUBMISSIONS_KEY, JSON.stringify(localSubmissions));
+  }, [localSubmissions]);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      setClientNow(Date.now());
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    if (!isConnected || typeof window === 'undefined' || !window.ethereum) return;
+    let isActive = true;
+    const fetchBlockTime = async () => {
+      try {
+        const latestBlock = await window.ethereum.request({
+          method: 'eth_getBlockByNumber',
+          params: ['latest', false],
+        });
+        if (!isActive || !latestBlock?.timestamp) return;
+        const timestamp = parseInt(latestBlock.timestamp, 16);
+        setBlockTimestamp(timestamp);
+        setBlockFetchedAt(Date.now());
+      } catch (err) {
+        console.warn('Failed to fetch latest block timestamp', err);
+      }
+    };
+
+    fetchBlockTime();
+    const interval = window.setInterval(fetchBlockTime, 10000);
+    return () => {
+      isActive = false;
+      window.clearInterval(interval);
+    };
+  }, [isConnected]);
 
   useEffect(() => {
     if (!isConnected || isInitialized || isInitializing || !isOnSepolia) return;
@@ -101,6 +172,18 @@ export default function BtcUpDownPage() {
         params: [SEPOLIA_CONFIG],
       });
     }
+  };
+
+  const handleLocalSubmit = (directionValue: 'up' | 'down') => {
+    const targetRound = Math.floor(Date.now() / 1000 / ROUND_SECONDS) + 1;
+    const newSubmission: LocalSubmission = {
+      id: `${targetRound}-${Date.now()}`,
+      roundId: targetRound,
+      direction: directionValue,
+      timestamp: Date.now(),
+      address: address || undefined,
+    };
+    setLocalSubmissions((prev) => [newSubmission, ...prev].slice(0, 6));
   };
 
   const handleConnect = async () => {
@@ -140,6 +223,21 @@ export default function BtcUpDownPage() {
         : isConnected
           ? 'Initializing FHEVM...'
           : 'Connect wallet');
+  const countdown = useMemo(() => {
+    const fallbackTime = Math.floor(clientNow / 1000);
+    const estimatedTime =
+      blockTimestamp && blockFetchedAt
+        ? blockTimestamp + Math.floor((clientNow - blockFetchedAt) / 1000)
+        : fallbackTime;
+    const secondsLeft = ROUND_SECONDS - (estimatedTime % ROUND_SECONDS || 0);
+    const minutes = Math.floor(secondsLeft / 60);
+    const seconds = secondsLeft % 60;
+    return {
+      minutesText: String(minutes).padStart(2, '0'),
+      secondsText: String(seconds).padStart(2, '0'),
+    };
+  }, [blockTimestamp, blockFetchedAt, clientNow]);
+  const displaySubmissions = localSubmissions.slice(0, 3);
 
   return (
     <div
@@ -255,7 +353,7 @@ export default function BtcUpDownPage() {
                 <div className="flex gap-4 items-end">
                   <div className="flex flex-col items-center">
                     <div className="bg-white border-4 border-neo-black px-6 py-4 text-6xl font-display shadow-neo-sm leading-none rounded-xl">
-                      04
+                      {countdown.minutesText}
                     </div>
                     <span className="text-sm font-bold uppercase mt-2 bg-primary px-2 border-2 border-neo-black">
                       Min
@@ -264,7 +362,7 @@ export default function BtcUpDownPage() {
                   <span className="text-6xl font-display mb-8">:</span>
                   <div className="flex flex-col items-center">
                     <div className="bg-neo-black text-primary border-4 border-neo-black px-6 py-4 text-6xl font-display shadow-neo-sm leading-none rounded-xl">
-                      59
+                      {countdown.secondsText}
                     </div>
                     <span className="text-sm font-bold uppercase mt-2 bg-primary px-2 border-2 border-neo-black">
                       Sec
@@ -276,7 +374,9 @@ export default function BtcUpDownPage() {
                 <p className="text-neo-black text-xs font-bold uppercase tracking-widest mb-1">
                   Total Pool Value
                 </p>
-                <p className="text-5xl font-display text-neo-black">14.5 ETH</p>
+                <p className={`text-5xl font-display text-neo-black ${pendingRevealClass}`}>
+                  {poolValueText}
+                </p>
               </div>
             </div>
           </div>
@@ -332,26 +432,28 @@ export default function BtcUpDownPage() {
             <div className="flex flex-col gap-8 mt-6">
               <div className="flex flex-col gap-3">
                 <label className="text-lg font-display uppercase text-neo-black ml-1">
-                  Wager Amount (ETH)
+                  Wager Amount (ETH) - Fixed
                 </label>
                 <div className="flex relative group">
                   <input
                     className="w-full bg-gray-100 border-4 border-neo-black text-neo-black font-display text-4xl p-6 focus:ring-0 focus:border-secondary focus:bg-white placeholder-neo-black/20 rounded-xl"
-                    defaultValue="0.5"
-                    placeholder="0.00"
+                    readOnly
+                    value={STAKE_ETH}
                     type="number"
                   />
                   <button
-                    className="absolute right-4 top-1/2 -translate-y-1/2 text-sm font-display bg-neo-black text-white px-4 py-2 border-2 border-transparent hover:bg-primary hover:text-black hover:border-neo-black transition-colors rounded-lg uppercase"
+                    className="absolute right-4 top-1/2 -translate-y-1/2 text-sm font-display bg-neo-black text-white px-4 py-2 border-2 border-transparent rounded-lg uppercase opacity-70 cursor-not-allowed"
+                    disabled
                     type="button"
                   >
-                    MAX
+                    FIXED
                   </button>
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-8">
                 <button
                   className="group relative bg-[#0bda0b] border-5 border-neo-black h-32 flex flex-col items-center justify-center shadow-neo active:shadow-none active:translate-x-[8px] active:translate-y-[8px] transition-all rounded-xl hover:bg-[#39ff39]"
+                  onClick={() => handleLocalSubmit('up')}
                   type="button"
                 >
                   <div className="flex items-center gap-2">
@@ -360,12 +462,15 @@ export default function BtcUpDownPage() {
                     </span>
                     <span className="text-neo-black font-display text-4xl uppercase tracking-tighter">Up</span>
                   </div>
-                  <span className="bg-white px-2 border-2 border-neo-black text-neo-black text-sm font-bold uppercase mt-2 shadow-sm transform -rotate-2">
-                    1.85x Payout
+                  <span
+                    className={`bg-white px-2 border-2 border-neo-black text-neo-black text-sm font-bold uppercase mt-2 shadow-sm transform -rotate-2 ${pendingRevealClass}`}
+                  >
+                    {upOddsLabel}
                   </span>
                 </button>
                 <button
                   className="group relative bg-[#ff3333] border-5 border-neo-black h-32 flex flex-col items-center justify-center shadow-neo active:shadow-none active:translate-x-[8px] active:translate-y-[8px] transition-all rounded-xl hover:bg-[#ff5555]"
+                  onClick={() => handleLocalSubmit('down')}
                   type="button"
                 >
                   <div className="flex items-center gap-2">
@@ -374,10 +479,50 @@ export default function BtcUpDownPage() {
                     </span>
                     <span className="text-white font-display text-4xl uppercase tracking-tighter">Down</span>
                   </div>
-                  <span className="bg-white px-2 border-2 border-neo-black text-neo-black text-sm font-bold uppercase mt-2 shadow-sm transform rotate-2">
-                    2.10x Payout
+                  <span
+                    className={`bg-white px-2 border-2 border-neo-black text-neo-black text-sm font-bold uppercase mt-2 shadow-sm transform rotate-2 ${pendingRevealClass}`}
+                  >
+                    {downOddsLabel}
                   </span>
                 </button>
+              </div>
+              <div className="border-3 border-neo-black bg-gray-100 p-4 rounded-xl">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-display uppercase text-neo-black/60">
+                    Local Submissions
+                  </span>
+                  <span className="text-xs font-bold uppercase text-neo-black/60">Stored locally</span>
+                </div>
+                {displaySubmissions.length ? (
+                  <div className="mt-3 space-y-2">
+                    {displaySubmissions.map((submission) => (
+                      <div
+                        className="flex items-center justify-between bg-white border-2 border-neo-black px-3 py-2 rounded-lg"
+                        key={submission.id}
+                      >
+                        <span className="text-sm font-display uppercase">
+                          Round #{submission.roundId}
+                        </span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-mono text-neo-black/70">
+                            {submission.address ? formatAddress(submission.address) : 'Local'}
+                          </span>
+                          <span
+                            className={
+                              submission.direction === 'up'
+                                ? 'bg-[#0bda0b] text-white text-xs font-display px-2 py-1 border-2 border-neo-black uppercase shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
+                                : 'bg-[#ff3333] text-white text-xs font-display px-2 py-1 border-2 border-neo-black uppercase shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
+                            }
+                          >
+                            {submission.direction.toUpperCase()}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-3 text-sm text-neo-black/60">No local submissions yet.</p>
+                )}
               </div>
             </div>
           </div>
@@ -412,69 +557,94 @@ export default function BtcUpDownPage() {
               </div>
             </div>
             <div className="flex-grow overflow-y-auto custom-scrollbar bg-white">
+              <div className="px-4 py-3 text-xs font-display uppercase text-neo-black/60 border-b-2 border-neo-black/10">
+                Directions stay encrypted until reveal.
+              </div>
               <table className="w-full text-left border-collapse">
                 <thead className="sticky top-0 bg-gray-100 z-10 border-b-4 border-neo-black shadow-sm">
                   <tr>
                     <th className="p-4 text-sm font-display uppercase text-neo-black">User</th>
-                    <th className="p-4 text-sm font-display uppercase text-neo-black text-center">Pos</th>
-                    <th className="p-4 text-sm font-display uppercase text-neo-black text-right">Amnt</th>
+                    <th className="p-4 text-sm font-display uppercase text-neo-black text-center">Action</th>
+                    <th className="p-4 text-sm font-display uppercase text-neo-black text-right">Amount</th>
                   </tr>
                 </thead>
                 <tbody className="text-base font-medium">
                   <tr className="border-b-2 border-neo-black/10 hover:bg-yellow-50 transition-colors">
                     <td className="p-4 font-mono font-bold text-neo-black/80">0x4a...92</td>
                     <td className="p-4 text-center">
-                      <span className="bg-[#0bda0b] text-white text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase">
-                        UP
+                      <span className="bg-neo-black text-white text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase">
+                        BET
                       </span>
                     </td>
-                    <td className="p-4 text-right font-display">0.5 ETH</td>
+                    <td className="p-4 text-right font-display">{STAKE_ETH} ETH</td>
                   </tr>
                   <tr className="border-b-2 border-neo-black/10 hover:bg-yellow-50 transition-colors">
                     <td className="p-4 font-mono font-bold text-neo-black/80">0x8b...11</td>
                     <td className="p-4 text-center">
-                      <span className="bg-[#ff3333] text-white text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase">
-                        DOWN
+                      <span className="bg-neo-black text-white text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase">
+                        BET
                       </span>
                     </td>
-                    <td className="p-4 text-right font-display">1.2 ETH</td>
+                    <td className="p-4 text-right font-display">{STAKE_ETH} ETH</td>
                   </tr>
                   <tr className="border-b-2 border-neo-black/10 hover:bg-yellow-50 transition-colors">
                     <td className="p-4 font-mono font-bold text-neo-black/80">0x1c...ff</td>
                     <td className="p-4 text-center">
-                      <span className="bg-[#0bda0b] text-white text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase">
-                        UP
+                      <span className="bg-neo-black text-white text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase">
+                        BET
                       </span>
                     </td>
-                    <td className="p-4 text-right font-display">0.1 ETH</td>
+                    <td className="p-4 text-right font-display">{STAKE_ETH} ETH</td>
                   </tr>
                   <tr className="border-b-2 border-neo-black/10 hover:bg-yellow-50 transition-colors">
                     <td className="p-4 font-mono font-bold text-neo-black/80">0x2d...aa</td>
                     <td className="p-4 text-center">
-                      <span className="bg-[#ff3333] text-white text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase">
-                        DOWN
+                      <span className="bg-neo-black text-white text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase">
+                        BET
                       </span>
                     </td>
-                    <td className="p-4 text-right font-display">2.0 ETH</td>
+                    <td className="p-4 text-right font-display">{STAKE_ETH} ETH</td>
                   </tr>
                   <tr className="border-b-2 border-neo-black/10 hover:bg-yellow-50 transition-colors">
                     <td className="p-4 font-mono font-bold text-neo-black/80">0x9e...44</td>
                     <td className="p-4 text-center">
-                      <span className="bg-[#0bda0b] text-white text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase">
-                        UP
+                      <span className="bg-neo-black text-white text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase">
+                        BET
                       </span>
                     </td>
-                    <td className="p-4 text-right font-display">0.05 ETH</td>
+                    <td className="p-4 text-right font-display">{STAKE_ETH} ETH</td>
                   </tr>
                   <tr className="hover:bg-yellow-50 transition-colors">
                     <td className="p-4 font-mono font-bold text-neo-black/80">0x7a...bb</td>
                     <td className="p-4 text-center">
-                      <span className="bg-[#ff3333] text-white text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase">
-                        DOWN
+                      <span className="bg-neo-black text-white text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase">
+                        BET
                       </span>
                     </td>
-                    <td className="p-4 text-right font-display">0.8 ETH</td>
+                    <td className="p-4 text-right font-display">{STAKE_ETH} ETH</td>
                   </tr>
+                  {totalsRevealed && (
+                    <>
+                      <tr className="border-b-2 border-neo-black/10 hover:bg-yellow-50 transition-colors">
+                        <td className="p-4 font-mono font-bold text-neo-black/80">0x4a...92</td>
+                        <td className="p-4 text-center">
+                          <span className="bg-primary text-neo-black text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase">
+                            CLAIM
+                          </span>
+                        </td>
+                        <td className="p-4 text-right font-display">0.018 ETH</td>
+                      </tr>
+                      <tr className="hover:bg-yellow-50 transition-colors">
+                        <td className="p-4 font-mono font-bold text-neo-black/80">0x1c...ff</td>
+                        <td className="p-4 text-center">
+                          <span className="bg-primary text-neo-black text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase">
+                            CLAIM
+                          </span>
+                        </td>
+                        <td className="p-4 text-right font-display">0.014 ETH</td>
+                      </tr>
+                    </>
+                  )}
                 </tbody>
               </table>
             </div>
