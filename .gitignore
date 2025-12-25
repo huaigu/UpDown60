@@ -17,3 +17,5 @@ coverage
 artifacts
 cache
 typechain
+hardhat/types
+hardhat/fhevmTemp

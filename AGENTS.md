@@ -28,6 +28,8 @@ Hardhat (smart contracts):
 - React component files use PascalCase; hooks/variables use camelCase; constants use UPPER_SNAKE.
 - Tailwind CSS is used for styling; keep utility class names readable and grouped.
 - Use `next lint` before committing UI changes.
+- Keep all code comments in English.
+- Keep all UI text in English.
 
 ## Testing Guidelines
 - No automated tests are configured at the repo root.

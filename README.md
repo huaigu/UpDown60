@@ -1,99 +1,42 @@
-# FHEVM NextJS App
+# BTC Up/Down FHEVM Contract Flow
 
-A complete NextJS application with FHEVM SDK integration, created with `create-fhevm-nextjs`.
+Round length: 5 minutes.
+Users bet only on the NEXT round.
+Stake amount is public; direction (up/down) stays encrypted.
 
-## 🚀 Getting Started
+Actors
+- User
+- Contract
+- Chainlink Automation (optional for finalize only)
+- First claimer (user or operator running the SDK for public decrypt)
 
-### **Install Dependencies**
-```bash
-npm install
-```
+Flow (high level)
+1) placeBet(roundId + 1, encDirection, stake)
+   - encTotalUp / encTotalDown are updated with FHE select
+2) finalizeRound(roundId)
+   - reads BTC/USD from Chainlink and sets result (up/down/tie)
+3) requestRoundReveal(roundId)
+   - encrypted total handles are emitted
+4) First claimer uses SDK publicDecrypt(handles)
+   - obtains cleartexts + decryptionProof
+5) resolveTotalsCallback(roundId, cleartexts, proof)
+   - totals stored on-chain, fee computed
+6) requestClaim(roundId)
+   - per-user payout handle is emitted
+7) Claimer uses SDK publicDecrypt(payoutHandle)
+   - obtains cleartexts + decryptionProof
+8) claimCallback(roundId, cleartexts, proof)
+   - payout is transferred
 
-### **Start Development Server**
-```bash
-npm run dev
-```
+ASCII diagram
 
-Open [http://localhost:3000](http://localhost:3000) to see your app.
-
-### **Build for Production**
-```bash
-npm run build
-npm start
-```
-
-## ✨ Features
-
-- ✅ **FHEVM SDK Integration** - Complete SDK with all adapters
-- ✅ **CDN Relayer Setup** - Automatic script injection
-- ✅ **TypeScript Support** - Full type safety
-- ✅ **Example Components** - Ready-to-use FHEVM operations
-- ✅ **Tailwind CSS** - Beautiful, responsive design
-- ✅ **Production Ready** - Optimized for deployment
-
-## 🎯 FHEVM Operations
-
-This app demonstrates:
-
-- **Wallet Connection** - MetaMask integration
-- **FHEVM Initialization** - SDK setup
-- **Encryption/Decryption** - Data operations
-- **Smart Contract Interaction** - Blockchain operations
-- **Public Decryption** - Testing utilities
-
-## 🏗️ Project Structure
-
-```
-├── app/
-│   ├── layout.tsx          # CDN script + FhevmProvider
-│   ├── page.tsx            # Main showcase component
-│   └── providers/
-│       └── FhevmProvider.tsx
-├── fhevm-sdk/              # Bundled FHEVM SDK
-│   ├── dist/               # Built SDK files
-│   └── package.json        # SDK configuration
-├── types/
-│   ├── cdn.d.ts           # CDN type declarations
-│   └── ethereum.d.ts      # Ethereum types
-└── package.json           # Dependencies
-```
-
-## 🔧 Configuration
-
-### **NextJS Configuration**
-- Transpiles `@fhevm-sdk` package
-- ESM externals configuration
-- TypeScript support
-
-### **FHEVM SDK**
-- Bundled locally (no workspace dependencies)
-- All adapters included (React, Vue, Vanilla, Node)
-- TypeScript definitions
-
-### **CDN Relayer**
-- Automatic script injection
-- TypeScript declarations
-- Browser compatibility
-
-## 🚀 Deployment
-
-This app is ready for deployment on:
-
-- **Vercel** - Recommended for NextJS
-- **Railway** - Great for monorepos
-- **Netlify** - Static site hosting
-- **Any Node.js hosting** - Docker, AWS, etc.
-
-## 📚 Learn More
-
-- [FHEVM Documentation](https://docs.fhevm.io)
-- [NextJS Documentation](https://nextjs.org/docs)
-- [Ethers.js Documentation](https://docs.ethers.org)
-
-## 🤝 Contributing
-
-Feel free to modify and extend this app for your needs!
-
-## 📄 License
-
-MIT License
+User/Claimer                    Contract
+------------                    --------
+placeBet(enc dir, stake)   ->   enc totals updated
+finalizeRound(roundId)     ->   result set from price feed
+requestRoundReveal()       ->   emit total handles
+publicDecrypt(handles)     ->   cleartexts + proof
+resolveTotalsCallback()    ->   totals stored
+requestClaim()             ->   emit payout handle
+publicDecrypt(handle)      ->   cleartexts + proof
+claimCallback()            ->   payout transfer
