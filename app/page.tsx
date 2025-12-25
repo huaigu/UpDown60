@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { ethers } from 'ethers';
 import { FhevmProvider, useFhevm } from './providers/FhevmProvider';
+import BtcUpDownPage from './btc-updown/page';
 import FheCounter from '../components/FheCounter';
 import FheRatings from '../components/FheRatings';
 import FheVoting from '../components/FheVoting';
@@ -414,6 +415,10 @@ function HomePage() {
 }
 
 export default function Home() {
+  return <BtcUpDownPage />;
+}
+
+export function LegacyHome() {
   return (
     <FhevmProvider>
       <HomePage />

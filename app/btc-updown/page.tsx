@@ -8,6 +8,7 @@ import {
   fetchPublicDecryption,
   initializeFheInstance,
 } from '../../src/lib/fhevmInstance';
+import { useFhevm } from '../providers/FhevmProvider';
 
 const CONTRACT_ADDRESSES: Record<number, string> = {
   31337: '0x0000000000000000000000000000000000000000',
@@ -28,8 +29,484 @@ const CONTRACT_ABI = [
 ];
 
 const ROUND_SECONDS = 300;
+const SEPOLIA_CHAIN_ID = 11155111;
+const SEPOLIA_CONFIG = {
+  chainId: '0xaa36a7',
+  chainName: 'Sepolia',
+  nativeCurrency: {
+    name: 'Sepolia Ether',
+    symbol: 'ETH',
+    decimals: 18,
+  },
+  rpcUrls: ['https://sepolia.infura.io/v3/'],
+  blockExplorerUrls: ['https://sepolia.etherscan.io/'],
+};
+
+const formatAddress = (value: string) => {
+  if (!value) return '';
+  return `${value.slice(0, 6)}...${value.slice(-4)}`;
+};
 
 export default function BtcUpDownPage() {
+  const {
+    connect,
+    isConnected,
+    isConnecting,
+    address,
+    isInitialized,
+    initialize,
+    walletError,
+    error,
+    chainId,
+  } = useFhevm();
+  const [isInitializing, setIsInitializing] = useState(false);
+  const [isSwitchingNetwork, setIsSwitchingNetwork] = useState(false);
+  const [networkError, setNetworkError] = useState('');
+  const isOnSepolia = chainId === SEPOLIA_CHAIN_ID;
+
+  useEffect(() => {
+    document.body.classList.add('btc-updown-body');
+    return () => {
+      document.body.classList.remove('btc-updown-body');
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isConnected || isInitialized || isInitializing || !isOnSepolia) return;
+    setIsInitializing(true);
+    initialize().finally(() => {
+      setIsInitializing(false);
+    });
+  }, [isConnected, isInitialized, isInitializing, initialize, isOnSepolia]);
+
+  const ensureSepolia = async () => {
+    if (!window.ethereum) {
+      throw new Error('No wallet found');
+    }
+    const chainIdHex = await window.ethereum.request({ method: 'eth_chainId' });
+    if (parseInt(chainIdHex, 16) === SEPOLIA_CHAIN_ID) {
+      return;
+    }
+    try {
+      await window.ethereum.request({
+        method: 'wallet_switchEthereumChain',
+        params: [{ chainId: SEPOLIA_CONFIG.chainId }],
+      });
+    } catch (switchError: any) {
+      if (switchError?.code !== 4902) {
+        throw switchError;
+      }
+      await window.ethereum.request({
+        method: 'wallet_addEthereumChain',
+        params: [SEPOLIA_CONFIG],
+      });
+    }
+  };
+
+  const handleConnect = async () => {
+    if (isConnecting || isInitializing || isSwitchingNetwork) return;
+    setNetworkError('');
+    try {
+      setIsSwitchingNetwork(true);
+      await ensureSepolia();
+      await connect();
+    } catch (err: any) {
+      setNetworkError(err?.message || 'Failed to switch network');
+    } finally {
+      setIsSwitchingNetwork(false);
+    }
+  };
+
+  const connectLabel = isSwitchingNetwork
+    ? 'Switching...'
+    : isConnected
+      ? isInitialized
+        ? 'Connected'
+        : 'Initializing...'
+      : isConnecting
+        ? 'Connecting...'
+        : 'Connect';
+
+  const statusHint =
+    walletError ||
+    error ||
+    networkError ||
+    (address
+      ? isOnSepolia
+        ? `Wallet: ${address}`
+        : 'Switch to Sepolia'
+      : isInitialized
+        ? 'FHEVM ready'
+        : isConnected
+          ? 'Initializing FHEVM...'
+          : 'Connect wallet');
+
+  return (
+    <div
+      className="btc-updown-home bg-background-light min-h-screen flex flex-col overflow-x-hidden text-neo-black selection:bg-secondary selection:text-white"
+      style={{
+        backgroundImage: 'radial-gradient(#000 1px, transparent 1px)',
+        backgroundSize: '20px 20px',
+      }}
+    >
+      <style jsx global>{`
+        body.btc-updown-body {
+          font-family: 'Space Grotesk', sans-serif;
+          background-color: #ffde59;
+          background-image: radial-gradient(#000 1px, transparent 1px);
+          background-size: 20px 20px;
+        }
+        body.btc-updown-body h1,
+        body.btc-updown-body h2,
+        body.btc-updown-body h3,
+        body.btc-updown-body .font-display {
+          font-family: 'Archivo Black', sans-serif;
+        }
+        body.btc-updown-body .font-mono {
+          font-family: 'Space Grotesk', monospace;
+        }
+        body.btc-updown-body ::-webkit-scrollbar {
+          width: 16px;
+          background: #ffde59;
+          border-left: 3px solid #000;
+        }
+        body.btc-updown-body ::-webkit-scrollbar-thumb {
+          background: #000;
+          border: 3px solid #ffde59;
+        }
+        body.btc-updown-body .text-outline {
+          text-shadow: 2px 2px 0px #000;
+        }
+      `}</style>
+      <header className="border-b-6 border-neo-black bg-white sticky top-0 z-50">
+        <div className="px-6 py-5 flex flex-col md:flex-row items-center justify-between gap-6 max-w-[1440px] mx-auto w-full">
+          <div className="flex items-center gap-4">
+            <div className="w-14 h-14 bg-neo-black flex items-center justify-center border-3 border-neo-black shadow-none -rotate-3">
+              <span className="material-symbols-outlined text-primary text-4xl font-bold">query_stats</span>
+            </div>
+            <h1 className="text-4xl font-display tracking-tighter uppercase transform rotate-1">
+              PREDICATE<span className="text-secondary">.MKT</span>
+            </h1>
+          </div>
+          <nav className="hidden md:flex items-center gap-4">
+            <a
+              className="bg-white px-6 py-3 text-lg font-display uppercase border-3 border-neo-black shadow-neo-sm hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-none transition-all"
+              href="#"
+            >
+              Markets
+            </a>
+            <a
+              className="bg-white px-6 py-3 text-lg font-display uppercase border-3 border-neo-black shadow-neo-sm hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-none transition-all"
+              href="#"
+            >
+              Leaderboard
+            </a>
+            <a
+              className="bg-white px-6 py-3 text-lg font-display uppercase border-3 border-neo-black shadow-neo-sm hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-none transition-all"
+              href="#"
+            >
+              Docs
+            </a>
+          </nav>
+          <button
+            className="flex items-center gap-3 bg-secondary text-white px-8 py-4 font-display text-lg uppercase border-3 border-neo-black shadow-neo hover:translate-x-[4px] hover:translate-y-[4px] hover:shadow-neo-hover active:translate-x-[8px] active:translate-y-[8px] active:shadow-none transition-all rotate-1"
+            onClick={handleConnect}
+            title={statusHint}
+            type="button"
+          >
+            <span className="material-symbols-outlined text-[24px]">wallet</span>
+            <span>{connectLabel}</span>
+          </button>
+        </div>
+      </header>
+      <div className="bg-neo-black border-b-6 border-neo-black overflow-hidden whitespace-nowrap py-3 flex items-center rotate-0">
+        <div className="animate-marquee inline-block">
+          <span className="mx-12 font-display text-2xl text-primary uppercase">
+            BTC/USD $64,230.50 <span className="text-[#0bda0b]">(+1.2%)</span>
+          </span>
+          <span className="mx-12 font-display text-2xl text-white uppercase">
+            ETH/USD $3,450.00 <span className="text-[#ff3333]">(-0.4%)</span>
+          </span>
+          <span className="mx-12 font-display text-2xl text-secondary uppercase">
+            SOL/USD $145.20 <span className="text-[#0bda0b]">(+5.6%)</span>
+          </span>
+          <span className="mx-12 font-display text-2xl text-primary uppercase">
+            BTC/USD $64,230.50 <span className="text-[#0bda0b]">(+1.2%)</span>
+          </span>
+          <span className="mx-12 font-display text-2xl text-white uppercase">
+            ETH/USD $3,450.00 <span className="text-[#ff3333]">(-0.4%)</span>
+          </span>
+          <span className="mx-12 font-display text-2xl text-secondary uppercase">
+            SOL/USD $145.20 <span className="text-[#0bda0b]">(+5.6%)</span>
+          </span>
+        </div>
+      </div>
+      <main className="flex-grow w-full max-w-[1440px] mx-auto p-6 md:p-10 grid grid-cols-1 lg:grid-cols-12 gap-10">
+        <div className="lg:col-span-8 flex flex-col gap-10">
+          <div className="border-6 border-neo-black bg-white p-8 shadow-neo relative rounded-2xl">
+            <div className="absolute -top-6 -right-4 bg-secondary text-white font-display px-6 py-2 border-3 border-neo-black uppercase text-lg transform rotate-6 shadow-neo-sm z-10">
+              Round #9284 Live
+            </div>
+            <div className="flex flex-col md:flex-row justify-between items-end gap-8">
+              <div>
+                <h2 className="bg-neo-black text-white inline-block px-2 py-1 text-sm font-display uppercase tracking-widest mb-4">
+                  Next Round Closes In
+                </h2>
+                <div className="flex gap-4 items-end">
+                  <div className="flex flex-col items-center">
+                    <div className="bg-white border-4 border-neo-black px-6 py-4 text-6xl font-display shadow-neo-sm leading-none rounded-xl">
+                      04
+                    </div>
+                    <span className="text-sm font-bold uppercase mt-2 bg-primary px-2 border-2 border-neo-black">
+                      Min
+                    </span>
+                  </div>
+                  <span className="text-6xl font-display mb-8">:</span>
+                  <div className="flex flex-col items-center">
+                    <div className="bg-neo-black text-primary border-4 border-neo-black px-6 py-4 text-6xl font-display shadow-neo-sm leading-none rounded-xl">
+                      59
+                    </div>
+                    <span className="text-sm font-bold uppercase mt-2 bg-primary px-2 border-2 border-neo-black">
+                      Sec
+                    </span>
+                  </div>
+                </div>
+              </div>
+              <div className="text-right bg-primary p-4 border-3 border-neo-black shadow-neo-sm -rotate-2 w-full md:w-auto rounded-xl">
+                <p className="text-neo-black text-xs font-bold uppercase tracking-widest mb-1">
+                  Total Pool Value
+                </p>
+                <p className="text-5xl font-display text-neo-black">14.5 ETH</p>
+              </div>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+            <div className="border-5 border-neo-black bg-white p-6 flex flex-col justify-between group hover:-translate-y-1 hover:shadow-neo transition-all rounded-xl relative overflow-hidden">
+              <div className="flex justify-between items-start mb-6 relative z-10">
+                <div className="flex items-center gap-4">
+                  <div className="w-16 h-16 bg-primary rounded-full flex items-center justify-center border-4 border-neo-black">
+                    <span className="material-symbols-outlined text-neo-black text-4xl">
+                      currency_bitcoin
+                    </span>
+                  </div>
+                  <span className="text-4xl font-display">BTC</span>
+                </div>
+                <span className="bg-[#0bda0b] text-white border-3 border-neo-black px-3 py-1 text-xl font-display uppercase transform rotate-2">
+                  +1.2%
+                </span>
+              </div>
+              <div className="relative z-10 bg-gray-100 p-4 border-3 border-neo-black rounded-lg">
+                <p className="text-neo-black/60 text-sm font-bold uppercase mb-1">Current Price</p>
+                <p className="text-4xl lg:text-5xl font-display tracking-tighter">$64,230.50</p>
+              </div>
+            </div>
+            <div className="border-5 border-neo-black bg-secondary p-6 flex flex-col justify-between relative overflow-hidden shadow-neo rounded-xl">
+              <div className="absolute -right-10 -bottom-10 opacity-30">
+                <span className="material-symbols-outlined text-white text-[180px]">
+                  show_chart
+                </span>
+              </div>
+              <div className="flex justify-between items-start mb-6 relative z-10">
+                <div className="flex items-center gap-4">
+                  <div className="w-16 h-16 bg-white rounded-full flex items-center justify-center border-4 border-neo-black">
+                    <span className="material-symbols-outlined text-neo-black text-4xl">token</span>
+                  </div>
+                  <span className="text-4xl font-display text-white">ETH</span>
+                </div>
+                <span className="bg-white text-neo-black border-3 border-neo-black px-3 py-1 text-xl font-display uppercase transform -rotate-2">
+                  -0.4%
+                </span>
+              </div>
+              <div className="relative z-10 bg-white p-4 border-3 border-neo-black rounded-lg">
+                <p className="text-neo-black/60 text-sm font-bold uppercase mb-1">Current Price</p>
+                <p className="text-4xl lg:text-5xl font-display tracking-tighter">$3,450.00</p>
+              </div>
+            </div>
+          </div>
+          <div className="border-6 border-neo-black bg-white p-8 relative shadow-neo rounded-2xl">
+            <div className="absolute -top-5 left-8 bg-neo-black text-white px-4 py-2 border-3 border-white transform -rotate-1 shadow-md z-10">
+              <h3 className="text-2xl font-display uppercase flex items-center gap-2">
+                Place Your Position
+              </h3>
+            </div>
+            <div className="flex flex-col gap-8 mt-6">
+              <div className="flex flex-col gap-3">
+                <label className="text-lg font-display uppercase text-neo-black ml-1">
+                  Wager Amount (ETH)
+                </label>
+                <div className="flex relative group">
+                  <input
+                    className="w-full bg-gray-100 border-4 border-neo-black text-neo-black font-display text-4xl p-6 focus:ring-0 focus:border-secondary focus:bg-white placeholder-neo-black/20 rounded-xl"
+                    defaultValue="0.5"
+                    placeholder="0.00"
+                    type="number"
+                  />
+                  <button
+                    className="absolute right-4 top-1/2 -translate-y-1/2 text-sm font-display bg-neo-black text-white px-4 py-2 border-2 border-transparent hover:bg-primary hover:text-black hover:border-neo-black transition-colors rounded-lg uppercase"
+                    type="button"
+                  >
+                    MAX
+                  </button>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-8">
+                <button
+                  className="group relative bg-[#0bda0b] border-5 border-neo-black h-32 flex flex-col items-center justify-center shadow-neo active:shadow-none active:translate-x-[8px] active:translate-y-[8px] transition-all rounded-xl hover:bg-[#39ff39]"
+                  type="button"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="material-symbols-outlined text-neo-black text-5xl font-bold group-hover:-translate-y-2 transition-transform">
+                      arrow_upward
+                    </span>
+                    <span className="text-neo-black font-display text-4xl uppercase tracking-tighter">Up</span>
+                  </div>
+                  <span className="bg-white px-2 border-2 border-neo-black text-neo-black text-sm font-bold uppercase mt-2 shadow-sm transform -rotate-2">
+                    1.85x Payout
+                  </span>
+                </button>
+                <button
+                  className="group relative bg-[#ff3333] border-5 border-neo-black h-32 flex flex-col items-center justify-center shadow-neo active:shadow-none active:translate-x-[8px] active:translate-y-[8px] transition-all rounded-xl hover:bg-[#ff5555]"
+                  type="button"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="material-symbols-outlined text-white text-5xl font-bold group-hover:translate-y-2 transition-transform">
+                      arrow_downward
+                    </span>
+                    <span className="text-white font-display text-4xl uppercase tracking-tighter">Down</span>
+                  </div>
+                  <span className="bg-white px-2 border-2 border-neo-black text-neo-black text-sm font-bold uppercase mt-2 shadow-sm transform rotate-2">
+                    2.10x Payout
+                  </span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div className="lg:col-span-4 flex flex-col gap-10">
+          <div className="border-5 border-neo-black bg-white shadow-neo p-0 rounded-2xl overflow-hidden">
+            <div className="bg-neo-black p-4 border-b-5 border-neo-black">
+              <h3 className="text-white font-display uppercase text-2xl tracking-wide">Your Stats</h3>
+            </div>
+            <div className="p-6 flex flex-col gap-5">
+              <div className="flex justify-between items-center border-b-2 border-neo-black/10 pb-3">
+                <span className="text-neo-black/60 text-base font-bold uppercase font-display">Win Rate</span>
+                <span className="font-display text-3xl bg-secondary text-white px-2 transform -rotate-1 border-2 border-neo-black">
+                  68%
+                </span>
+              </div>
+              <div className="flex justify-between items-center border-b-2 border-neo-black/10 pb-3">
+                <span className="text-neo-black/60 text-base font-bold uppercase font-display">Total Wagered</span>
+                <span className="font-display text-2xl">12.5 ETH</span>
+              </div>
+              <div className="flex justify-between items-center pt-1">
+                <span className="text-neo-black/60 text-base font-bold uppercase font-display">Net Profit</span>
+                <span className="font-display text-3xl text-[#0bda0b]">+4.2 ETH</span>
+              </div>
+            </div>
+          </div>
+          <div className="border-5 border-neo-black bg-white flex-grow flex flex-col min-h-[400px] shadow-neo rounded-2xl overflow-hidden">
+            <div className="bg-secondary p-4 border-b-5 border-neo-black flex justify-between items-center">
+              <h3 className="text-white font-display uppercase text-2xl tracking-wide">Live Feed</h3>
+              <div className="flex gap-2">
+                <div className="w-4 h-4 bg-[#0bda0b] border-2 border-neo-black rounded-full animate-pulse" />
+              </div>
+            </div>
+            <div className="flex-grow overflow-y-auto custom-scrollbar bg-white">
+              <table className="w-full text-left border-collapse">
+                <thead className="sticky top-0 bg-gray-100 z-10 border-b-4 border-neo-black shadow-sm">
+                  <tr>
+                    <th className="p-4 text-sm font-display uppercase text-neo-black">User</th>
+                    <th className="p-4 text-sm font-display uppercase text-neo-black text-center">Pos</th>
+                    <th className="p-4 text-sm font-display uppercase text-neo-black text-right">Amnt</th>
+                  </tr>
+                </thead>
+                <tbody className="text-base font-medium">
+                  <tr className="border-b-2 border-neo-black/10 hover:bg-yellow-50 transition-colors">
+                    <td className="p-4 font-mono font-bold text-neo-black/80">0x4a...92</td>
+                    <td className="p-4 text-center">
+                      <span className="bg-[#0bda0b] text-white text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase">
+                        UP
+                      </span>
+                    </td>
+                    <td className="p-4 text-right font-display">0.5 ETH</td>
+                  </tr>
+                  <tr className="border-b-2 border-neo-black/10 hover:bg-yellow-50 transition-colors">
+                    <td className="p-4 font-mono font-bold text-neo-black/80">0x8b...11</td>
+                    <td className="p-4 text-center">
+                      <span className="bg-[#ff3333] text-white text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase">
+                        DOWN
+                      </span>
+                    </td>
+                    <td className="p-4 text-right font-display">1.2 ETH</td>
+                  </tr>
+                  <tr className="border-b-2 border-neo-black/10 hover:bg-yellow-50 transition-colors">
+                    <td className="p-4 font-mono font-bold text-neo-black/80">0x1c...ff</td>
+                    <td className="p-4 text-center">
+                      <span className="bg-[#0bda0b] text-white text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase">
+                        UP
+                      </span>
+                    </td>
+                    <td className="p-4 text-right font-display">0.1 ETH</td>
+                  </tr>
+                  <tr className="border-b-2 border-neo-black/10 hover:bg-yellow-50 transition-colors">
+                    <td className="p-4 font-mono font-bold text-neo-black/80">0x2d...aa</td>
+                    <td className="p-4 text-center">
+                      <span className="bg-[#ff3333] text-white text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase">
+                        DOWN
+                      </span>
+                    </td>
+                    <td className="p-4 text-right font-display">2.0 ETH</td>
+                  </tr>
+                  <tr className="border-b-2 border-neo-black/10 hover:bg-yellow-50 transition-colors">
+                    <td className="p-4 font-mono font-bold text-neo-black/80">0x9e...44</td>
+                    <td className="p-4 text-center">
+                      <span className="bg-[#0bda0b] text-white text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase">
+                        UP
+                      </span>
+                    </td>
+                    <td className="p-4 text-right font-display">0.05 ETH</td>
+                  </tr>
+                  <tr className="hover:bg-yellow-50 transition-colors">
+                    <td className="p-4 font-mono font-bold text-neo-black/80">0x7a...bb</td>
+                    <td className="p-4 text-center">
+                      <span className="bg-[#ff3333] text-white text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase">
+                        DOWN
+                      </span>
+                    </td>
+                    <td className="p-4 text-right font-display">0.8 ETH</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </main>
+      <footer className="border-t-6 border-neo-black bg-white py-10 mt-auto">
+        <div className="max-w-[1440px] mx-auto px-6 flex flex-col md:flex-row justify-between items-center gap-6">
+          <p className="text-neo-black text-sm font-bold uppercase bg-primary px-3 py-1 border-2 border-neo-black shadow-[4px_4px_0px_0px_#000000]">
+            © 2024 Predicate Market Inc.
+          </p>
+          <div className="flex gap-8">
+            <a
+              className="text-neo-black hover:text-secondary text-sm font-display uppercase border-b-4 border-transparent hover:border-secondary transition-all"
+              href="#"
+            >
+              Terms of Service
+            </a>
+            <a
+              className="text-neo-black hover:text-secondary text-sm font-display uppercase border-b-4 border-transparent hover:border-secondary transition-all"
+              href="#"
+            >
+              Privacy Policy
+            </a>
+          </div>
+        </div>
+      </footer>
+    </div>
+  );
+}
+
+function LegacyBtcUpDownPage() {
   const [account, setAccount] = useState('');
   const [chainId, setChainId] = useState<number | null>(null);
   const [message, setMessage] = useState('');
@@ -262,8 +739,7 @@ export default function BtcUpDownPage() {
 
       <div className="space-y-3">
         <div className="text-sm text-gray-400">
-          Current round: {currentRound ?? '-'} | Target round:{' '}
-          {roundId ?? (currentRound !== null ? currentRound + 1 : '-')}
+          Current round: {currentRound ?? '-'} | Target round: {roundId ?? (currentRound !== null ? currentRound + 1 : '-')}
         </div>
         <div className="flex gap-2 items-center">
           <label className="text-sm text-gray-300">Round ID</label>

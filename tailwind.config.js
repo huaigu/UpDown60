@@ -25,12 +25,36 @@ module.exports = {
         'zama-red': '#f44336',
         'zama-orange': '#ff9800',
         'zama-blue': '#007bff',
+        'primary': '#FFDE59',
+        'secondary': '#FF66C4',
+        'neo-black': '#000000',
+        'neo-white': '#ffffff',
+        'background-light': '#FFDE59',
+        'background-dark': '#FFDE59',
+        'surface': '#ffffff',
       },
       fontFamily: {
         'system': ['system-ui', '-apple-system', 'sans-serif'],
       },
       boxShadow: {
         'zama': '0 4px 12px rgba(0, 0, 0, 0.3)',
+        'neo': '8px 8px 0px 0px #000000',
+        'neo-hover': '4px 4px 0px 0px #000000',
+        'neo-sm': '4px 4px 0px 0px #000000',
+      },
+      borderWidth: {
+        '3': '3px',
+        '5': '5px',
+        '6': '6px',
+      },
+      keyframes: {
+        marquee: {
+          '0%': { transform: 'translateX(0)' },
+          '100%': { transform: 'translateX(-50%)' },
+        },
+      },
+      animation: {
+        marquee: 'marquee 20s linear infinite',
       },
     },
   },
