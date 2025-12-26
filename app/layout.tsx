@@ -4,8 +4,11 @@ import { FhevmProvider } from './providers/FhevmProvider'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'Universal FHEVM SDK - Next.js Showcase',
-  description: 'Clean, simple FHEVM implementation that actually works',
+  title: 'BTC.UPDOWN5',
+  description: 'Encrypted BTC up/down prediction market demo on FHEVM.',
+  icons: {
+    icon: '/favicon.svg',
+  },
 }
 
 export default function RootLayout({

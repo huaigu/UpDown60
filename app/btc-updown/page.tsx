@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ethers } from 'ethers';
 import {
   createEncryptedInput,
@@ -12,12 +12,17 @@ import { useFhevm } from '../providers/FhevmProvider';
 
 const CONTRACT_ADDRESSES: Record<number, string> = {
   31337: '0x0000000000000000000000000000000000000000',
-  11155111: '0x0000000000000000000000000000000000000000',
+  11155111: '0x837e0B7FAAaB99D3f4806d37699B5Ec8C4d67bbF',
 };
 
 const CONTRACT_ABI = [
+  'event BetPlaced(uint256 indexed roundId, address indexed user, uint64 stake)',
+  'event ClaimPaid(uint256 indexed roundId, address indexed user, uint64 payout)',
   'function stakeAmount() view returns (uint64)',
+  'function feeBps() view returns (uint16)',
   'function getCurrentRound() view returns (uint256)',
+  'function getRoundState(uint256 roundId) view returns (bool,uint256,uint256,int256,int256,uint8,bool,bool,bool)',
+  'function getRoundTotals(uint256 roundId) view returns (uint64,uint64,uint64)',
   'function getRoundHandles(uint256 roundId) view returns (bytes32,bytes32)',
   'function getPendingClaim(uint256 roundId, address user) view returns (bool,bytes32)',
   'function placeBet(uint256 roundId, bytes32 encryptedDirection, bytes proof) payable',
@@ -30,6 +35,12 @@ const CONTRACT_ABI = [
 
 const ROUND_SECONDS = 300;
 const SEPOLIA_CHAIN_ID = 11155111;
+const PUBLIC_RPC_URL = 'https://ethereum-sepolia-rpc.publicnode.com';
+const BTC_USD_FEED = '0x1b44F3514812d835EB1BDB0acB33d3fA3351Ee43';
+const FEED_ABI = [
+  'function latestRoundData() view returns (uint80,int256,uint256,uint256,uint80)',
+  'function decimals() view returns (uint8)',
+];
 const SEPOLIA_CONFIG = {
   chainId: '0xaa36a7',
   chainName: 'Sepolia',
@@ -38,15 +49,34 @@ const SEPOLIA_CONFIG = {
     symbol: 'ETH',
     decimals: 18,
   },
-  rpcUrls: ['https://sepolia.infura.io/v3/'],
+  rpcUrls: [
+    'https://ethereum-sepolia.publicnode.com',
+    'https://rpc.sepolia.org',
+    'https://sepolia.drpc.org',
+    'https://sepolia.infura.io/v3/',
+  ],
   blockExplorerUrls: ['https://sepolia.etherscan.io/'],
 };
 const STAKE_ETH = '0.01';
 const LOCAL_SUBMISSIONS_KEY = 'btcUpDownLocalSubmissions';
+const LOCAL_FEED_KEY = 'btcUpDownLiveFeed';
+const LOCAL_FEED_BLOCK_KEY = 'btcUpDownLiveFeedLastBlock';
 
 const formatAddress = (value: string) => {
   if (!value) return '';
   return `${value.slice(0, 6)}...${value.slice(-4)}`;
+};
+
+const formatEthValue = (value: string) => {
+  const numeric = Number(value);
+  if (Number.isNaN(numeric)) return value;
+  return numeric.toFixed(4).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
+};
+
+const formatPercent = (value: number) => {
+  if (Number.isNaN(value)) return '--';
+  const sign = value > 0 ? '+' : value < 0 ? '-' : '';
+  return `${sign}${Math.abs(value).toFixed(2)}%`;
 };
 
 type LocalSubmission = {
@@ -55,6 +85,26 @@ type LocalSubmission = {
   direction: 'up' | 'down';
   timestamp: number;
   address?: string;
+};
+
+type FeedEvent = {
+  id: string;
+  type: 'bet' | 'claim';
+  user: string;
+  roundId: number;
+  amountEth: string;
+  txHash: string;
+  blockNumber: number;
+  logIndex: number;
+};
+
+type RoundTotals = {
+  totalUp: bigint;
+  totalDown: bigint;
+  feeAmount: bigint;
+  result: number;
+  resultSet: boolean;
+  totalsRevealed: boolean;
 };
 
 export default function BtcUpDownPage() {
@@ -69,19 +119,53 @@ export default function BtcUpDownPage() {
     error,
     chainId,
   } = useFhevm();
+  const contractAddress = useMemo(() => {
+    if (!chainId) return '';
+    return CONTRACT_ADDRESSES[chainId] || '';
+  }, [chainId]);
+  const readChainId = SEPOLIA_CHAIN_ID;
+  const readContractAddress = CONTRACT_ADDRESSES[readChainId] || '';
+  const hasReadContract = !!readContractAddress && readContractAddress !== ethers.ZeroAddress;
+  const hasContract = !!contractAddress && contractAddress !== ethers.ZeroAddress;
   const [isInitializing, setIsInitializing] = useState(false);
   const [isSwitchingNetwork, setIsSwitchingNetwork] = useState(false);
   const [networkError, setNetworkError] = useState('');
   const [localSubmissions, setLocalSubmissions] = useState<LocalSubmission[]>([]);
+  const [feedEvents, setFeedEvents] = useState<FeedEvent[]>([]);
+  const [lastIndexedBlock, setLastIndexedBlock] = useState<number | null>(null);
+  const [roundTotals, setRoundTotals] = useState<RoundTotals | null>(null);
+  const [currentRound, setCurrentRound] = useState<number | null>(null);
+  const [stakeAmount, setStakeAmount] = useState<bigint | null>(null);
+  const [actionError, setActionError] = useState('');
+  const [betLoading, setBetLoading] = useState(false);
+  const [betLoadingText, setBetLoadingText] = useState('');
+  const [btcPrice, setBtcPrice] = useState<string | null>(null);
+  const [btcChangePct, setBtcChangePct] = useState<number | null>(null);
+  const btcPriceRef = useRef<number | null>(null);
   const [blockTimestamp, setBlockTimestamp] = useState<number | null>(null);
   const [blockFetchedAt, setBlockFetchedAt] = useState<number | null>(null);
-  const [clientNow, setClientNow] = useState(Date.now());
+  const [clientNow, setClientNow] = useState(0);
   const isOnSepolia = chainId === SEPOLIA_CHAIN_ID;
-  const totalsRevealed = false;
-  const poolValueText = totalsRevealed ? '14.5 ETH' : 'Pending reveal';
-  const upOddsLabel = totalsRevealed ? '1.85x Payout' : 'Pending reveal';
-  const downOddsLabel = totalsRevealed ? '2.10x Payout' : 'Pending reveal';
-  const pendingRevealClass = totalsRevealed ? '' : 'font-black uppercase';
+  const publicProvider = useMemo(() => new ethers.JsonRpcProvider(PUBLIC_RPC_URL), []);
+  const readProvider = useMemo(() => {
+    if (isConnected && isOnSepolia && typeof window !== 'undefined' && window.ethereum) {
+      return new ethers.BrowserProvider(window.ethereum);
+    }
+    return publicProvider;
+  }, [isConnected, isOnSepolia, publicProvider]);
+  const feedStorageKey = useMemo(() => {
+    if (!readContractAddress || readContractAddress === ethers.ZeroAddress) return '';
+    return `${LOCAL_FEED_KEY}:${readChainId}:${readContractAddress.toLowerCase()}`;
+  }, [readChainId, readContractAddress]);
+  const feedBlockKey = feedStorageKey ? `${feedStorageKey}:${LOCAL_FEED_BLOCK_KEY}` : '';
+  const totalsRevealed = roundTotals?.totalsRevealed ?? false;
+  const isPendingReveal = !roundTotals || !roundTotals.totalsRevealed || !roundTotals.resultSet;
+  const stakeEth = stakeAmount ? ethers.formatEther(stakeAmount) : STAKE_ETH;
+  const poolValueText = !isPendingReveal && roundTotals
+    ? `${ethers.formatEther(roundTotals.totalUp + roundTotals.totalDown)} ETH`
+    : 'Pending reveal';
+  const pendingRevealClass = isPendingReveal ? 'font-black uppercase' : '';
+  const btcPriceText = btcPrice ? `$${btcPrice}` : '$--';
 
   useEffect(() => {
     document.body.classList.add('btc-updown-body');
@@ -110,6 +194,42 @@ export default function BtcUpDownPage() {
   }, [localSubmissions]);
 
   useEffect(() => {
+    if (typeof window === 'undefined' || !feedStorageKey) return;
+    const stored = window.localStorage.getItem(feedStorageKey);
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored) as FeedEvent[];
+        if (Array.isArray(parsed)) {
+          setFeedEvents(parsed);
+        } else {
+          setFeedEvents([]);
+        }
+      } catch (err) {
+        console.warn('Failed to parse feed cache', err);
+        setFeedEvents([]);
+      }
+    } else {
+      setFeedEvents([]);
+    }
+    const storedBlock = window.localStorage.getItem(feedBlockKey);
+    if (storedBlock) {
+      const parsedBlock = Number(storedBlock);
+      setLastIndexedBlock(Number.isNaN(parsedBlock) ? null : parsedBlock);
+    } else {
+      setLastIndexedBlock(null);
+    }
+  }, [feedStorageKey, feedBlockKey]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !feedStorageKey) return;
+    window.localStorage.setItem(feedStorageKey, JSON.stringify(feedEvents));
+    if (lastIndexedBlock !== null) {
+      window.localStorage.setItem(feedBlockKey, String(lastIndexedBlock));
+    }
+  }, [feedEvents, feedStorageKey, feedBlockKey, lastIndexedBlock]);
+
+  useEffect(() => {
+    setClientNow(Date.now());
     const interval = window.setInterval(() => {
       setClientNow(Date.now());
     }, 1000);
@@ -117,16 +237,15 @@ export default function BtcUpDownPage() {
   }, []);
 
   useEffect(() => {
-    if (!isConnected || typeof window === 'undefined' || !window.ethereum) return;
     let isActive = true;
     const fetchBlockTime = async () => {
       try {
-        const latestBlock = await window.ethereum.request({
-          method: 'eth_getBlockByNumber',
-          params: ['latest', false],
-        });
+        const latestBlock = await readProvider.getBlock('latest');
         if (!isActive || !latestBlock?.timestamp) return;
-        const timestamp = parseInt(latestBlock.timestamp, 16);
+        const timestamp =
+          typeof latestBlock.timestamp === 'number'
+            ? latestBlock.timestamp
+            : Number(latestBlock.timestamp);
         setBlockTimestamp(timestamp);
         setBlockFetchedAt(Date.now());
       } catch (err) {
@@ -140,7 +259,48 @@ export default function BtcUpDownPage() {
       isActive = false;
       window.clearInterval(interval);
     };
-  }, [isConnected]);
+  }, [readProvider]);
+
+  useEffect(() => {
+    let isActive = true;
+    const loadContractData = async () => {
+      try {
+        if (!hasReadContract) return;
+        const contract = getReadContract();
+        const [stake, roundId] = await Promise.all([
+          contract.stakeAmount(),
+          contract.getCurrentRound(),
+        ]);
+        if (!isActive) return;
+        setStakeAmount(stake);
+        const roundNumber = Number(roundId);
+        setCurrentRound(roundNumber);
+        const revealRoundId = roundNumber > 0 ? roundNumber - 1 : 0;
+        const [roundState, totals] = await Promise.all([
+          contract.getRoundState(revealRoundId),
+          contract.getRoundTotals(revealRoundId),
+        ]);
+        if (!isActive) return;
+        setRoundTotals({
+          totalUp: totals[0],
+          totalDown: totals[1],
+          feeAmount: totals[2],
+          result: Number(roundState[5]),
+          resultSet: roundState[6],
+          totalsRevealed: roundState[8],
+        });
+      } catch (err) {
+        console.warn('Failed to load contract data', err);
+      }
+    };
+
+    loadContractData();
+    const interval = window.setInterval(loadContractData, 12000);
+    return () => {
+      isActive = false;
+      window.clearInterval(interval);
+    };
+  }, [hasReadContract, readContractAddress, readProvider]);
 
   useEffect(() => {
     if (!isConnected || isInitialized || isInitializing || !isOnSepolia) return;
@@ -149,6 +309,129 @@ export default function BtcUpDownPage() {
       setIsInitializing(false);
     });
   }, [isConnected, isInitialized, isInitializing, initialize, isOnSepolia]);
+
+  useEffect(() => {
+    if (!readProvider) return;
+    let isActive = true;
+    const loadBtcPrice = async () => {
+      try {
+        const feed = new ethers.Contract(BTC_USD_FEED, FEED_ABI, readProvider);
+        const [decimals, roundData] = await Promise.all([
+          feed.decimals(),
+          feed.latestRoundData(),
+        ]);
+        if (!isActive) return;
+        const price = roundData[1];
+        const numeric = Number(price) / 10 ** Number(decimals);
+        if (Number.isNaN(numeric)) return;
+        const formatted = new Intl.NumberFormat('en-US', {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        }).format(numeric);
+        setBtcPrice(formatted);
+        if (btcPriceRef.current && btcPriceRef.current > 0) {
+          const changePct = ((numeric - btcPriceRef.current) / btcPriceRef.current) * 100;
+          setBtcChangePct(changePct);
+        }
+        btcPriceRef.current = numeric;
+      } catch (err) {
+        console.warn('Failed to load BTC price', err);
+      }
+    };
+
+    loadBtcPrice();
+    const interval = window.setInterval(loadBtcPrice, 15000);
+    return () => {
+      isActive = false;
+      window.clearInterval(interval);
+    };
+  }, [readProvider]);
+
+  useEffect(() => {
+    if (hasReadContract) return;
+    setRoundTotals(null);
+    setCurrentRound(null);
+    setStakeAmount(null);
+    setFeedEvents([]);
+    setLastIndexedBlock(null);
+  }, [hasReadContract]);
+
+  useEffect(() => {
+    if (!hasReadContract || !feedStorageKey) return;
+    let isActive = true;
+    const contract = new ethers.Contract(readContractAddress, CONTRACT_ABI, readProvider);
+
+    const syncFeed = async () => {
+      try {
+        const latestBlock = await readProvider.getBlockNumber();
+        const fromBlock =
+          lastIndexedBlock !== null
+            ? lastIndexedBlock + 1
+            : Math.max(latestBlock - 2000, 0);
+        if (fromBlock > latestBlock) return;
+        const [betEvents, claimEvents] = await Promise.all([
+          contract.queryFilter(contract.filters.BetPlaced(), fromBlock, latestBlock),
+          contract.queryFilter(contract.filters.ClaimPaid(), fromBlock, latestBlock),
+        ]);
+        if (!isActive) return;
+        const mapped = [
+          ...betEvents.map((event) => ({
+            id: `${event.transactionHash}-${event.logIndex}`,
+            type: 'bet' as const,
+            user: event.args?.user as string,
+            roundId: Number(event.args?.roundId ?? 0),
+            amountEth: ethers.formatEther(event.args?.stake ?? 0n),
+            txHash: event.transactionHash,
+            blockNumber: event.blockNumber ?? 0,
+            logIndex: event.logIndex ?? 0,
+          })),
+          ...claimEvents.map((event) => ({
+            id: `${event.transactionHash}-${event.logIndex}`,
+            type: 'claim' as const,
+            user: event.args?.user as string,
+            roundId: Number(event.args?.roundId ?? 0),
+            amountEth: ethers.formatEther(event.args?.payout ?? 0n),
+            txHash: event.transactionHash,
+            blockNumber: event.blockNumber ?? 0,
+            logIndex: event.logIndex ?? 0,
+          })),
+        ];
+
+        if (mapped.length) {
+          setFeedEvents((prev) => {
+            const merged = new Map<string, FeedEvent>();
+            [...prev, ...mapped].forEach((item) => {
+              merged.set(item.id, item);
+            });
+            return Array.from(merged.values())
+              .sort((a, b) => {
+                if (b.blockNumber !== a.blockNumber) {
+                  return b.blockNumber - a.blockNumber;
+                }
+                return b.logIndex - a.logIndex;
+              })
+              .slice(0, 20);
+          });
+        }
+        setLastIndexedBlock(latestBlock);
+      } catch (err) {
+        console.warn('Failed to sync live feed', err);
+      }
+    };
+
+    syncFeed();
+    const interval = window.setInterval(syncFeed, 15000);
+    return () => {
+      isActive = false;
+      window.clearInterval(interval);
+    };
+  }, [
+    hasReadContract,
+    readContractAddress,
+    readProvider,
+    feedStorageKey,
+    lastIndexedBlock,
+  ]);
 
   const ensureSepolia = async () => {
     if (!window.ethereum) {
@@ -174,8 +457,21 @@ export default function BtcUpDownPage() {
     }
   };
 
-  const handleLocalSubmit = (directionValue: 'up' | 'down') => {
-    const targetRound = Math.floor(Date.now() / 1000 / ROUND_SECONDS) + 1;
+  const getProvider = () => new ethers.BrowserProvider(window.ethereum);
+
+  const getReadContract = () => {
+    return new ethers.Contract(readContractAddress, CONTRACT_ABI, readProvider);
+  };
+
+  const getWriteContract = async (addressOverride?: string) => {
+    const provider = getProvider();
+    const signer = await provider.getSigner();
+    return new ethers.Contract(addressOverride || contractAddress, CONTRACT_ABI, signer);
+  };
+
+  const handleLocalSubmit = (directionValue: 'up' | 'down', roundIdOverride?: number) => {
+    const targetRound =
+      roundIdOverride ?? Math.floor(Date.now() / 1000 / ROUND_SECONDS) + 1;
     const newSubmission: LocalSubmission = {
       id: `${targetRound}-${Date.now()}`,
       roundId: targetRound,
@@ -184,6 +480,68 @@ export default function BtcUpDownPage() {
       address: address || undefined,
     };
     setLocalSubmissions((prev) => [newSubmission, ...prev].slice(0, 6));
+  };
+
+  const handlePlaceBet = async (directionValue: 'up' | 'down') => {
+    setActionError('');
+    if (betLoading) return;
+    setBetLoading(true);
+    try {
+      if (!window.ethereum) {
+        throw new Error('No wallet found');
+      }
+      if (!isConnected) {
+        setBetLoadingText('Connecting wallet...');
+        await handleConnect();
+      }
+      const accounts = await window.ethereum.request({ method: 'eth_accounts' });
+      const userAddress = accounts?.[0];
+      if (!userAddress) {
+        throw new Error('Wallet not connected');
+      }
+      const chainIdHex = await window.ethereum.request({ method: 'eth_chainId' });
+      const connectedChainId = parseInt(chainIdHex, 16);
+      if (connectedChainId !== SEPOLIA_CHAIN_ID) {
+        throw new Error('Switch to Sepolia to place a bet');
+      }
+      const addressForChain = CONTRACT_ADDRESSES[connectedChainId] || '';
+      if (!addressForChain || addressForChain === ethers.ZeroAddress) {
+        throw new Error('Contract address missing');
+      }
+      if (!isInitialized) {
+        setBetLoadingText('Initializing FHEVM...');
+        await initialize();
+      }
+      setBetLoadingText('Preparing encrypted input...');
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      setBetLoadingText('Encrypting with FHEVM...');
+      const contract = await getWriteContract(addressForChain);
+      const latestRound = currentRound ?? Number(await contract.getCurrentRound());
+      const targetRound = latestRound + 1;
+      const encrypted = await createEncryptedInput(
+        addressForChain,
+        userAddress,
+        directionValue === 'up' ? 1 : 0
+      );
+      let encryptedData: any = encrypted.encryptedData;
+      let proof: any = encrypted.proof;
+      if (encryptedData instanceof Uint8Array) {
+        encryptedData = ethers.hexlify(encryptedData);
+      }
+      if (proof instanceof Uint8Array) {
+        proof = ethers.hexlify(proof);
+      }
+      const value = stakeAmount ?? ethers.parseEther(STAKE_ETH);
+      setBetLoadingText('Submitting bet...');
+      const tx = await contract.placeBet(targetRound, encryptedData, proof, { value });
+      await tx.wait();
+      handleLocalSubmit(directionValue, targetRound);
+    } catch (err: any) {
+      setActionError(err?.message || 'Bet failed');
+    } finally {
+      setBetLoading(false);
+      setBetLoadingText('');
+    }
   };
 
   const handleConnect = async () => {
@@ -223,6 +581,33 @@ export default function BtcUpDownPage() {
         : isConnected
           ? 'Initializing FHEVM...'
           : 'Connect wallet');
+  const odds = useMemo(() => {
+    if (!roundTotals || !roundTotals.totalsRevealed || !roundTotals.resultSet) {
+      return { up: 'Pending reveal', down: 'Pending reveal' };
+    }
+
+    if (roundTotals.result === 3) {
+      return { up: '1.00x Refund', down: '1.00x Refund' };
+    }
+
+    const winningTotal =
+      roundTotals.result === 1 ? roundTotals.totalUp : roundTotals.totalDown;
+    const losingTotal =
+      roundTotals.result === 1 ? roundTotals.totalDown : roundTotals.totalUp;
+    const fee = roundTotals.feeAmount;
+    const distributable = losingTotal > fee ? losingTotal - fee : 0n;
+    const winningTotalEth = Number(ethers.formatEther(winningTotal));
+    const distributableEth = Number(ethers.formatEther(distributable));
+    const multiplier =
+      winningTotalEth > 0 ? (winningTotalEth + distributableEth) / winningTotalEth : 1;
+    const formattedMultiplier = `${multiplier.toFixed(2)}x Payout`;
+
+    return roundTotals.result === 1
+      ? { up: formattedMultiplier, down: 'No payout' }
+      : { up: 'No payout', down: formattedMultiplier };
+  }, [roundTotals]);
+  const upOddsLabel = odds.up;
+  const downOddsLabel = odds.down;
   const countdown = useMemo(() => {
     const fallbackTime = Math.floor(clientNow / 1000);
     const estimatedTime =
@@ -238,6 +623,34 @@ export default function BtcUpDownPage() {
     };
   }, [blockTimestamp, blockFetchedAt, clientNow]);
   const displaySubmissions = localSubmissions.slice(0, 3);
+  const displayRoundId = currentRound ?? 9284;
+  const displayFeedEvents = feedEvents.slice(0, 6);
+  const feedHint = !hasReadContract
+    ? 'Contract address missing.'
+    : !isConnected
+      ? 'Public RPC active. No on-chain activity yet.'
+      : 'No on-chain activity yet.';
+  const roundResultId = currentRound && currentRound > 0 ? currentRound - 1 : null;
+  const roundResultText = useMemo(() => {
+    if (!roundResultId) return 'Round -- Pending';
+    if (!roundTotals?.resultSet) return `Round #${roundResultId} Pending`;
+    if (roundTotals.result === 1) return `Round #${roundResultId} UP`;
+    if (roundTotals.result === 2) return `Round #${roundResultId} DOWN`;
+    if (roundTotals.result === 3) return `Round #${roundResultId} TIE`;
+    return `Round #${roundResultId} Pending`;
+  }, [roundResultId, roundTotals]);
+  const roundResultClass =
+    roundTotals?.result === 1
+      ? 'text-[#0bda0b]'
+      : roundTotals?.result === 2
+        ? 'text-[#ff3333]'
+        : 'text-white';
+  const canBet = isConnected && isOnSepolia && isInitialized && hasContract;
+  const betHint =
+    actionError ||
+    (canBet
+      ? 'Submit on-chain bet'
+      : 'Connect wallet on Sepolia to submit on-chain');
 
   return (
     <div
@@ -283,7 +696,7 @@ export default function BtcUpDownPage() {
               <span className="material-symbols-outlined text-primary text-4xl font-bold">query_stats</span>
             </div>
             <h1 className="text-4xl font-display tracking-tighter uppercase transform rotate-1">
-              PREDICATE<span className="text-secondary">.MKT</span>
+              BTC<span className="text-secondary">.UPDOWN5</span>
             </h1>
           </div>
           <nav className="hidden md:flex items-center gap-4">
@@ -319,23 +732,23 @@ export default function BtcUpDownPage() {
       </header>
       <div className="bg-neo-black border-b-6 border-neo-black overflow-hidden whitespace-nowrap py-3 flex items-center rotate-0">
         <div className="animate-marquee inline-block">
-          <span className="mx-12 font-display text-2xl text-primary uppercase">
-            BTC/USD $64,230.50 <span className="text-[#0bda0b]">(+1.2%)</span>
+          <span className={`mx-12 font-display text-2xl uppercase ${roundResultClass}`}>
+            {roundResultText}
           </span>
-          <span className="mx-12 font-display text-2xl text-white uppercase">
-            ETH/USD $3,450.00 <span className="text-[#ff3333]">(-0.4%)</span>
+          <span className={`mx-12 font-display text-2xl uppercase ${roundResultClass}`}>
+            {roundResultText}
           </span>
-          <span className="mx-12 font-display text-2xl text-secondary uppercase">
-            SOL/USD $145.20 <span className="text-[#0bda0b]">(+5.6%)</span>
+          <span className={`mx-12 font-display text-2xl uppercase ${roundResultClass}`}>
+            {roundResultText}
           </span>
-          <span className="mx-12 font-display text-2xl text-primary uppercase">
-            BTC/USD $64,230.50 <span className="text-[#0bda0b]">(+1.2%)</span>
+          <span className={`mx-12 font-display text-2xl uppercase ${roundResultClass}`}>
+            {roundResultText}
           </span>
-          <span className="mx-12 font-display text-2xl text-white uppercase">
-            ETH/USD $3,450.00 <span className="text-[#ff3333]">(-0.4%)</span>
+          <span className={`mx-12 font-display text-2xl uppercase ${roundResultClass}`}>
+            {roundResultText}
           </span>
-          <span className="mx-12 font-display text-2xl text-secondary uppercase">
-            SOL/USD $145.20 <span className="text-[#0bda0b]">(+5.6%)</span>
+          <span className={`mx-12 font-display text-2xl uppercase ${roundResultClass}`}>
+            {roundResultText}
           </span>
         </div>
       </div>
@@ -343,7 +756,7 @@ export default function BtcUpDownPage() {
         <div className="lg:col-span-8 flex flex-col gap-10">
           <div className="border-6 border-neo-black bg-white p-8 shadow-neo relative rounded-2xl">
             <div className="absolute -top-6 -right-4 bg-secondary text-white font-display px-6 py-2 border-3 border-neo-black uppercase text-lg transform rotate-6 shadow-neo-sm z-10">
-              Round #9284 Live
+              Round #{displayRoundId} Live
             </div>
             <div className="flex flex-col md:flex-row justify-between items-end gap-8">
               <div>
@@ -391,13 +804,21 @@ export default function BtcUpDownPage() {
                   </div>
                   <span className="text-4xl font-display">BTC</span>
                 </div>
-                <span className="bg-[#0bda0b] text-white border-3 border-neo-black px-3 py-1 text-xl font-display uppercase transform rotate-2">
-                  +1.2%
+                <span
+                  className={`border-3 border-neo-black px-3 py-1 text-xl font-display uppercase transform rotate-2 ${
+                    btcChangePct === null
+                      ? 'bg-white text-neo-black'
+                      : btcChangePct >= 0
+                        ? 'bg-[#0bda0b] text-white'
+                        : 'bg-[#ff3333] text-white'
+                  }`}
+                >
+                  {btcChangePct === null ? '--' : formatPercent(btcChangePct)}
                 </span>
               </div>
               <div className="relative z-10 bg-gray-100 p-4 border-3 border-neo-black rounded-lg">
                 <p className="text-neo-black/60 text-sm font-bold uppercase mb-1">Current Price</p>
-                <p className="text-4xl lg:text-5xl font-display tracking-tighter">$64,230.50</p>
+                <p className="text-4xl lg:text-5xl font-display tracking-tighter">{btcPriceText}</p>
               </div>
             </div>
             <div className="border-5 border-neo-black bg-secondary p-6 flex flex-col justify-between relative overflow-hidden shadow-neo rounded-xl">
@@ -438,7 +859,7 @@ export default function BtcUpDownPage() {
                   <input
                     className="w-full bg-gray-100 border-4 border-neo-black text-neo-black font-display text-4xl p-6 focus:ring-0 focus:border-secondary focus:bg-white placeholder-neo-black/20 rounded-xl"
                     readOnly
-                    value={STAKE_ETH}
+                    value={stakeEth}
                     type="number"
                   />
                   <button
@@ -452,9 +873,13 @@ export default function BtcUpDownPage() {
               </div>
               <div className="grid grid-cols-2 gap-8">
                 <button
-                  className="group relative bg-[#0bda0b] border-5 border-neo-black h-32 flex flex-col items-center justify-center shadow-neo active:shadow-none active:translate-x-[8px] active:translate-y-[8px] transition-all rounded-xl hover:bg-[#39ff39]"
-                  onClick={() => handleLocalSubmit('up')}
+                  className={`group relative bg-[#0bda0b] border-5 border-neo-black h-32 flex flex-col items-center justify-center shadow-neo transition-all rounded-xl hover:bg-[#39ff39] ${
+                    betLoading ? 'opacity-60 cursor-not-allowed' : 'active:shadow-none active:translate-x-[8px] active:translate-y-[8px]'
+                  }`}
+                  onClick={() => handlePlaceBet('up')}
+                  title={betHint}
                   type="button"
+                  disabled={betLoading}
                 >
                   <div className="flex items-center gap-2">
                     <span className="material-symbols-outlined text-neo-black text-5xl font-bold group-hover:-translate-y-2 transition-transform">
@@ -469,9 +894,13 @@ export default function BtcUpDownPage() {
                   </span>
                 </button>
                 <button
-                  className="group relative bg-[#ff3333] border-5 border-neo-black h-32 flex flex-col items-center justify-center shadow-neo active:shadow-none active:translate-x-[8px] active:translate-y-[8px] transition-all rounded-xl hover:bg-[#ff5555]"
-                  onClick={() => handleLocalSubmit('down')}
+                  className={`group relative bg-[#ff3333] border-5 border-neo-black h-32 flex flex-col items-center justify-center shadow-neo transition-all rounded-xl hover:bg-[#ff5555] ${
+                    betLoading ? 'opacity-60 cursor-not-allowed' : 'active:shadow-none active:translate-x-[8px] active:translate-y-[8px]'
+                  }`}
+                  onClick={() => handlePlaceBet('down')}
+                  title={betHint}
                   type="button"
+                  disabled={betLoading}
                 >
                   <div className="flex items-center gap-2">
                     <span className="material-symbols-outlined text-white text-5xl font-bold group-hover:translate-y-2 transition-transform">
@@ -486,6 +915,11 @@ export default function BtcUpDownPage() {
                   </span>
                 </button>
               </div>
+              {betLoading && (
+                <div className="border-3 border-neo-black bg-neo-black text-primary font-display uppercase text-sm px-4 py-3 rounded-xl shadow-neo-sm animate-pulse">
+                  {betLoadingText || 'Loading...'}
+                </div>
+              )}
               <div className="border-3 border-neo-black bg-gray-100 p-4 rounded-xl">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-display uppercase text-neo-black/60">
@@ -569,81 +1003,40 @@ export default function BtcUpDownPage() {
                   </tr>
                 </thead>
                 <tbody className="text-base font-medium">
-                  <tr className="border-b-2 border-neo-black/10 hover:bg-yellow-50 transition-colors">
-                    <td className="p-4 font-mono font-bold text-neo-black/80">0x4a...92</td>
-                    <td className="p-4 text-center">
-                      <span className="bg-neo-black text-white text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase">
-                        BET
-                      </span>
-                    </td>
-                    <td className="p-4 text-right font-display">{STAKE_ETH} ETH</td>
-                  </tr>
-                  <tr className="border-b-2 border-neo-black/10 hover:bg-yellow-50 transition-colors">
-                    <td className="p-4 font-mono font-bold text-neo-black/80">0x8b...11</td>
-                    <td className="p-4 text-center">
-                      <span className="bg-neo-black text-white text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase">
-                        BET
-                      </span>
-                    </td>
-                    <td className="p-4 text-right font-display">{STAKE_ETH} ETH</td>
-                  </tr>
-                  <tr className="border-b-2 border-neo-black/10 hover:bg-yellow-50 transition-colors">
-                    <td className="p-4 font-mono font-bold text-neo-black/80">0x1c...ff</td>
-                    <td className="p-4 text-center">
-                      <span className="bg-neo-black text-white text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase">
-                        BET
-                      </span>
-                    </td>
-                    <td className="p-4 text-right font-display">{STAKE_ETH} ETH</td>
-                  </tr>
-                  <tr className="border-b-2 border-neo-black/10 hover:bg-yellow-50 transition-colors">
-                    <td className="p-4 font-mono font-bold text-neo-black/80">0x2d...aa</td>
-                    <td className="p-4 text-center">
-                      <span className="bg-neo-black text-white text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase">
-                        BET
-                      </span>
-                    </td>
-                    <td className="p-4 text-right font-display">{STAKE_ETH} ETH</td>
-                  </tr>
-                  <tr className="border-b-2 border-neo-black/10 hover:bg-yellow-50 transition-colors">
-                    <td className="p-4 font-mono font-bold text-neo-black/80">0x9e...44</td>
-                    <td className="p-4 text-center">
-                      <span className="bg-neo-black text-white text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase">
-                        BET
-                      </span>
-                    </td>
-                    <td className="p-4 text-right font-display">{STAKE_ETH} ETH</td>
-                  </tr>
-                  <tr className="hover:bg-yellow-50 transition-colors">
-                    <td className="p-4 font-mono font-bold text-neo-black/80">0x7a...bb</td>
-                    <td className="p-4 text-center">
-                      <span className="bg-neo-black text-white text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase">
-                        BET
-                      </span>
-                    </td>
-                    <td className="p-4 text-right font-display">{STAKE_ETH} ETH</td>
-                  </tr>
-                  {totalsRevealed && (
-                    <>
-                      <tr className="border-b-2 border-neo-black/10 hover:bg-yellow-50 transition-colors">
-                        <td className="p-4 font-mono font-bold text-neo-black/80">0x4a...92</td>
+                  {displayFeedEvents.length ? (
+                    displayFeedEvents.map((event) => (
+                      <tr
+                        className="border-b-2 border-neo-black/10 hover:bg-yellow-50 transition-colors"
+                        key={event.id}
+                      >
+                        <td className="p-4 font-mono font-bold text-neo-black/80">
+                          {formatAddress(event.user)}
+                        </td>
                         <td className="p-4 text-center">
-                          <span className="bg-primary text-neo-black text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase">
-                            CLAIM
+                          <span
+                            className={
+                              event.type === 'claim'
+                                ? 'bg-primary text-neo-black text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase'
+                                : 'bg-neo-black text-white text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase'
+                            }
+                          >
+                            {event.type === 'claim' ? 'CLAIM' : 'BET'}
                           </span>
                         </td>
-                        <td className="p-4 text-right font-display">0.018 ETH</td>
-                      </tr>
-                      <tr className="hover:bg-yellow-50 transition-colors">
-                        <td className="p-4 font-mono font-bold text-neo-black/80">0x1c...ff</td>
-                        <td className="p-4 text-center">
-                          <span className="bg-primary text-neo-black text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase">
-                            CLAIM
-                          </span>
+                        <td className="p-4 text-right font-display">
+                          {formatEthValue(event.amountEth)} ETH
                         </td>
-                        <td className="p-4 text-right font-display">0.014 ETH</td>
                       </tr>
-                    </>
+                    ))
+                  ) : (
+                    <tr>
+                      <td
+                        className="p-4 text-center text-sm text-neo-black/60"
+                        colSpan={3}
+                      >
+                        {feedHint}
+                      </td>
+                    </tr>
                   )}
                 </tbody>
               </table>
@@ -654,7 +1047,7 @@ export default function BtcUpDownPage() {
       <footer className="border-t-6 border-neo-black bg-white py-10 mt-auto">
         <div className="max-w-[1440px] mx-auto px-6 flex flex-col md:flex-row justify-between items-center gap-6">
           <p className="text-neo-black text-sm font-bold uppercase bg-primary px-3 py-1 border-2 border-neo-black shadow-[4px_4px_0px_0px_#000000]">
-            © 2024 Predicate Market Inc.
+            © 2025 Predicate Market Inc.
           </p>
           <div className="flex gap-8">
             <a

@@ -54,6 +54,13 @@ contract BtcUpDownFHE is ZamaEthereumConfig, AutomationCompatibleInterface {
         bool claimed;
     }
 
+    struct UserStats {
+        uint64 totalBets;
+        uint64 totalWins;
+        uint256 totalWagered;
+        uint256 totalPayout;
+    }
+
     address public owner;
     address public feeRecipient;
     uint16 public feeBps;
@@ -69,6 +76,9 @@ contract BtcUpDownFHE is ZamaEthereumConfig, AutomationCompatibleInterface {
     mapping(uint256 => Round) private rounds;
     mapping(uint256 => mapping(address => Bet)) private bets;
     mapping(uint256 => mapping(address => bytes32)) private claimHandles;
+    mapping(address => UserStats) private userStats;
+    mapping(address => bool) private isParticipant;
+    address[] private participants;
 
     event RoundInitialized(uint256 indexed roundId, uint256 startTime, uint256 endTime);
     event BetPlaced(uint256 indexed roundId, address indexed user, uint64 stake);
@@ -173,6 +183,35 @@ contract BtcUpDownFHE is ZamaEthereumConfig, AutomationCompatibleInterface {
         return (b.claimRequested && !b.claimed, claimHandles[roundId][user]);
     }
 
+    function getParticipantCount() external view returns (uint256) {
+        return participants.length;
+    }
+
+    function getParticipants(uint256 offset, uint256 limit) external view returns (address[] memory) {
+        uint256 total = participants.length;
+        if (offset >= total) {
+            return new address[](0);
+        }
+        uint256 end = offset + limit;
+        if (end > total) {
+            end = total;
+        }
+        address[] memory result = new address[](end - offset);
+        for (uint256 i = offset; i < end; i++) {
+            result[i - offset] = participants[i];
+        }
+        return result;
+    }
+
+    function getUserStats(address user)
+        external
+        view
+        returns (uint64 totalBets, uint64 totalWins, uint256 totalWagered, uint256 totalPayout)
+    {
+        UserStats storage stats = userStats[user];
+        return (stats.totalBets, stats.totalWins, stats.totalWagered, stats.totalPayout);
+    }
+
     function placeBet(
         uint256 roundId,
         externalEuint32 encryptedDirection,
@@ -204,6 +243,8 @@ contract BtcUpDownFHE is ZamaEthereumConfig, AutomationCompatibleInterface {
         b.stake = uint64(msg.value);
         b.direction = dir;
         FHE.allowThis(b.direction);
+        _trackParticipant(msg.sender);
+        _recordBet(msg.sender, uint64(msg.value));
 
         emit BetPlaced(roundId, msg.sender, uint64(msg.value));
     }
@@ -308,6 +349,7 @@ contract BtcUpDownFHE is ZamaEthereumConfig, AutomationCompatibleInterface {
         if (r.result == Result.Tie) {
             b.claimed = true;
             _safeTransfer(msg.sender, stake);
+            _recordPayout(msg.sender, stake, false);
             emit ClaimPaid(roundId, msg.sender, stake);
             return;
         }
@@ -320,6 +362,7 @@ contract BtcUpDownFHE is ZamaEthereumConfig, AutomationCompatibleInterface {
         if (winningTotal == 0) {
             b.claimed = true;
             _safeTransfer(msg.sender, stake);
+            _recordPayout(msg.sender, stake, false);
             emit ClaimPaid(roundId, msg.sender, stake);
             return;
         }
@@ -366,6 +409,7 @@ contract BtcUpDownFHE is ZamaEthereumConfig, AutomationCompatibleInterface {
         if (payout > 0) {
             _safeTransfer(msg.sender, payout);
         }
+        _recordPayout(msg.sender, payout, payout > b.stake);
         emit ClaimPaid(roundId, msg.sender, payout);
     }
 
@@ -452,6 +496,29 @@ contract BtcUpDownFHE is ZamaEthereumConfig, AutomationCompatibleInterface {
     function _safeTransfer(address to, uint256 amount) internal {
         (bool success, ) = to.call{ value: amount }("");
         require(success, "Transfer failed");
+    }
+
+    function _trackParticipant(address user) internal {
+        if (!isParticipant[user]) {
+            isParticipant[user] = true;
+            participants.push(user);
+        }
+    }
+
+    function _recordBet(address user, uint64 stake) internal {
+        UserStats storage stats = userStats[user];
+        stats.totalBets += 1;
+        stats.totalWagered += stake;
+    }
+
+    function _recordPayout(address user, uint64 payout, bool isWin) internal {
+        UserStats storage stats = userStats[user];
+        if (payout > 0) {
+            stats.totalPayout += payout;
+        }
+        if (isWin) {
+            stats.totalWins += 1;
+        }
     }
 
     receive() external payable {}
