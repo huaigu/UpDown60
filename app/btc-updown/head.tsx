@@ -1,10 +1,10 @@
 export default function Head() {
   return (
     <>
-      <title>BTC.UPDOWN5</title>
+      <title>BTCUPDOWN60</title>
       <meta
         name="description"
-        content="Encrypted BTC up/down prediction market demo on FHEVM."
+        content="Encrypted BTC up/down prediction market demo on FHEVM (60-min rounds)."
       />
       <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
       <link rel="preconnect" href="https://fonts.googleapis.com" />

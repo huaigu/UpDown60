@@ -12,7 +12,7 @@ import { useFhevm } from '../providers/FhevmProvider';
 
 const CONTRACT_ADDRESSES: Record<number, string> = {
   31337: '0x0000000000000000000000000000000000000000',
-  11155111: '0x837e0B7FAAaB99D3f4806d37699B5Ec8C4d67bbF',
+  11155111: '0x9AD2CcA4749402C20b2f83D3e8850C2B127b61Dd',
 };
 
 const CONTRACT_ABI = [
@@ -24,7 +24,9 @@ const CONTRACT_ABI = [
   'function getRoundState(uint256 roundId) view returns (bool,uint256,uint256,int256,int256,uint8,bool,bool,bool)',
   'function getRoundTotals(uint256 roundId) view returns (uint64,uint64,uint64)',
   'function getRoundHandles(uint256 roundId) view returns (bytes32,bytes32)',
+  'function getBet(uint256 roundId, address user) view returns (bool,uint64,bool,bool)',
   'function getPendingClaim(uint256 roundId, address user) view returns (bool,bytes32)',
+  'function getUserStats(address user) view returns (uint64,uint64,uint256,uint256)',
   'function placeBet(uint256 roundId, bytes32 encryptedDirection, bytes proof) payable',
   'function finalizeRound(uint256 roundId)',
   'function requestRoundReveal(uint256 roundId)',
@@ -33,14 +35,10 @@ const CONTRACT_ABI = [
   'function claimCallback(uint256 roundId, bytes cleartexts, bytes proof)',
 ];
 
-const ROUND_SECONDS = 300;
+const ROUND_SECONDS = 3600;
 const SEPOLIA_CHAIN_ID = 11155111;
 const PUBLIC_RPC_URL = 'https://ethereum-sepolia-rpc.publicnode.com';
-const BTC_USD_FEED = '0x1b44F3514812d835EB1BDB0acB33d3fA3351Ee43';
-const FEED_ABI = [
-  'function latestRoundData() view returns (uint80,int256,uint256,uint256,uint80)',
-  'function decimals() view returns (uint8)',
-];
+const BINANCE_BTC_PRICE_URL = 'https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT';
 const SEPOLIA_CONFIG = {
   chainId: '0xaa36a7',
   chainName: 'Sepolia',
@@ -139,6 +137,13 @@ export default function BtcUpDownPage() {
   const [actionError, setActionError] = useState('');
   const [betLoading, setBetLoading] = useState(false);
   const [betLoadingText, setBetLoadingText] = useState('');
+  const [hasActiveBet, setHasActiveBet] = useState(false);
+  const [userStats, setUserStats] = useState<{
+    totalBets: number;
+    totalWins: number;
+    totalWagered: bigint;
+    totalPayout: bigint;
+  } | null>(null);
   const [btcPrice, setBtcPrice] = useState<string | null>(null);
   const [btcChangePct, setBtcChangePct] = useState<number | null>(null);
   const btcPriceRef = useRef<number | null>(null);
@@ -161,11 +166,14 @@ export default function BtcUpDownPage() {
   const totalsRevealed = roundTotals?.totalsRevealed ?? false;
   const isPendingReveal = !roundTotals || !roundTotals.totalsRevealed || !roundTotals.resultSet;
   const stakeEth = stakeAmount ? ethers.formatEther(stakeAmount) : STAKE_ETH;
+  const targetRoundId = currentRound !== null ? currentRound + 1 : null;
   const poolValueText = !isPendingReveal && roundTotals
     ? `${ethers.formatEther(roundTotals.totalUp + roundTotals.totalDown)} ETH`
     : 'Pending reveal';
   const pendingRevealClass = isPendingReveal ? 'font-black uppercase' : '';
   const btcPriceText = btcPrice ? `$${btcPrice}` : '$--';
+  const btcTrendLabel =
+    btcChangePct === null ? '--' : btcChangePct > 0 ? 'UP' : btcChangePct < 0 ? 'DOWN' : 'FLAT';
 
   useEffect(() => {
     document.body.classList.add('btc-updown-body');
@@ -303,6 +311,69 @@ export default function BtcUpDownPage() {
   }, [hasReadContract, readContractAddress, readProvider]);
 
   useEffect(() => {
+    let isActive = true;
+    const loadBetStatus = async () => {
+      if (!hasReadContract || !address || targetRoundId === null) {
+        if (isActive) {
+          setHasActiveBet(false);
+        }
+        return;
+      }
+      try {
+        const contract = getReadContract();
+        const bet = await contract.getBet(targetRoundId, address);
+        if (!isActive) return;
+        setHasActiveBet(Boolean(bet[0]));
+      } catch (err) {
+        if (!isActive) return;
+        console.warn('Failed to load bet status', err);
+        setHasActiveBet(false);
+      }
+    };
+
+    loadBetStatus();
+    const interval = window.setInterval(loadBetStatus, 10000);
+    return () => {
+      isActive = false;
+      window.clearInterval(interval);
+    };
+  }, [hasReadContract, address, targetRoundId, readProvider, readContractAddress]);
+
+  useEffect(() => {
+    let isActive = true;
+    const loadUserStats = async () => {
+      if (!hasReadContract || !address) {
+        if (isActive) {
+          setUserStats(null);
+        }
+        return;
+      }
+      try {
+        const contract = getReadContract();
+        const stats = await contract.getUserStats(address);
+        if (!isActive) return;
+        setUserStats({
+          totalBets: Number(stats[0]),
+          totalWins: Number(stats[1]),
+          totalWagered: BigInt(stats[2]),
+          totalPayout: BigInt(stats[3]),
+        });
+      } catch (err) {
+        if (!isActive) return;
+        console.warn('Failed to load user stats', err);
+        setUserStats(null);
+      }
+    };
+
+    loadUserStats();
+    const interval = window.setInterval(loadUserStats, 15000);
+    return () => {
+      isActive = false;
+      window.clearInterval(interval);
+    };
+  }, [hasReadContract, address, readProvider, readContractAddress]);
+
+  useEffect(() => {
     if (!isConnected || isInitialized || isInitializing || !isOnSepolia) return;
     setIsInitializing(true);
     initialize().finally(() => {
@@ -311,18 +382,16 @@ export default function BtcUpDownPage() {
   }, [isConnected, isInitialized, isInitializing, initialize, isOnSepolia]);
 
   useEffect(() => {
-    if (!readProvider) return;
     let isActive = true;
     const loadBtcPrice = async () => {
       try {
-        const feed = new ethers.Contract(BTC_USD_FEED, FEED_ABI, readProvider);
-        const [decimals, roundData] = await Promise.all([
-          feed.decimals(),
-          feed.latestRoundData(),
-        ]);
+        const response = await fetch(BINANCE_BTC_PRICE_URL, { cache: 'no-store' });
+        if (!response.ok) {
+          throw new Error(`Binance price request failed: ${response.status}`);
+        }
+        const data = await response.json();
         if (!isActive) return;
-        const price = roundData[1];
-        const numeric = Number(price) / 10 ** Number(decimals);
+        const numeric = Number(data?.price);
         if (Number.isNaN(numeric)) return;
         const formatted = new Intl.NumberFormat('en-US', {
           minimumFractionDigits: 2,
@@ -335,7 +404,7 @@ export default function BtcUpDownPage() {
         }
         btcPriceRef.current = numeric;
       } catch (err) {
-        console.warn('Failed to load BTC price', err);
+        console.warn('Failed to load BTC price from Binance', err);
       }
     };
 
@@ -345,7 +414,7 @@ export default function BtcUpDownPage() {
       isActive = false;
       window.clearInterval(interval);
     };
-  }, [readProvider]);
+  }, []);
 
   useEffect(() => {
     if (hasReadContract) return;
@@ -484,7 +553,7 @@ export default function BtcUpDownPage() {
 
   const handlePlaceBet = async (directionValue: 'up' | 'down') => {
     setActionError('');
-    if (betLoading) return;
+    if (betLoading || hasActiveBet) return;
     setBetLoading(true);
     try {
       if (!window.ethereum) {
@@ -536,6 +605,7 @@ export default function BtcUpDownPage() {
       const tx = await contract.placeBet(targetRound, encryptedData, proof, { value });
       await tx.wait();
       handleLocalSubmit(directionValue, targetRound);
+      setHasActiveBet(true);
     } catch (err: any) {
       setActionError(err?.message || 'Bet failed');
     } finally {
@@ -645,12 +715,40 @@ export default function BtcUpDownPage() {
       : roundTotals?.result === 2
         ? 'text-[#ff3333]'
         : 'text-white';
+  const winRateText = userStats
+    ? userStats.totalBets > 0
+      ? `${Math.round((userStats.totalWins / userStats.totalBets) * 100)}%`
+      : '0%'
+    : '--';
+  const totalWageredText = userStats
+    ? `${formatEthValue(ethers.formatEther(userStats.totalWagered))} ETH`
+    : '--';
+  const netProfitValue = userStats
+    ? userStats.totalPayout - userStats.totalWagered
+    : null;
+  const netProfitText =
+    netProfitValue === null
+      ? '--'
+      : `${netProfitValue > 0n ? '+' : netProfitValue < 0n ? '-' : ''}${formatEthValue(
+          ethers.formatEther(netProfitValue < 0n ? -netProfitValue : netProfitValue)
+        )} ETH`;
+  const netProfitClass =
+    netProfitValue === null
+      ? 'text-neo-black'
+      : netProfitValue > 0n
+        ? 'text-[#0bda0b]'
+        : netProfitValue < 0n
+          ? 'text-[#ff3333]'
+          : 'text-neo-black';
   const canBet = isConnected && isOnSepolia && isInitialized && hasContract;
+  const betDisabled = betLoading || !canBet || hasActiveBet;
   const betHint =
     actionError ||
-    (canBet
-      ? 'Submit on-chain bet'
-      : 'Connect wallet on Sepolia to submit on-chain');
+    (hasActiveBet
+      ? 'Already placed a bet for this round'
+      : canBet
+        ? 'Submit on-chain bet'
+        : 'Connect wallet on Sepolia to submit on-chain');
 
   return (
     <div
@@ -696,7 +794,7 @@ export default function BtcUpDownPage() {
               <span className="material-symbols-outlined text-primary text-4xl font-bold">query_stats</span>
             </div>
             <h1 className="text-4xl font-display tracking-tighter uppercase transform rotate-1">
-              BTC<span className="text-secondary">.UPDOWN5</span>
+              BTC<span className="text-secondary">UPDOWN60</span>
             </h1>
           </div>
           <nav className="hidden md:flex items-center gap-4">
@@ -806,41 +904,49 @@ export default function BtcUpDownPage() {
                 </div>
                 <span
                   className={`border-3 border-neo-black px-3 py-1 text-xl font-display uppercase transform rotate-2 ${
-                    btcChangePct === null
+                    btcChangePct === null || btcChangePct === 0
                       ? 'bg-white text-neo-black'
-                      : btcChangePct >= 0
+                      : btcChangePct > 0
                         ? 'bg-[#0bda0b] text-white'
                         : 'bg-[#ff3333] text-white'
                   }`}
                 >
-                  {btcChangePct === null ? '--' : formatPercent(btcChangePct)}
+                  {btcTrendLabel}
                 </span>
               </div>
               <div className="relative z-10 bg-gray-100 p-4 border-3 border-neo-black rounded-lg">
-                <p className="text-neo-black/60 text-sm font-bold uppercase mb-1">Current Price</p>
+                <p className="text-neo-black/60 text-sm font-bold uppercase mb-1">
+                  CEX Price (Binance)
+                </p>
                 <p className="text-4xl lg:text-5xl font-display tracking-tighter">{btcPriceText}</p>
+                <p className="text-xs text-neo-black/60 mt-2">CEX price, not on-chain.</p>
               </div>
             </div>
-            <div className="border-5 border-neo-black bg-secondary p-6 flex flex-col justify-between relative overflow-hidden shadow-neo rounded-xl">
+            <div
+              className="border-5 border-neo-black bg-gray-200 p-6 flex flex-col justify-between relative overflow-hidden shadow-neo rounded-xl opacity-70 grayscale pointer-events-none"
+              aria-disabled="true"
+            >
               <div className="absolute -right-10 -bottom-10 opacity-30">
-                <span className="material-symbols-outlined text-white text-[180px]">
+                <span className="material-symbols-outlined text-neo-black/20 text-[180px]">
                   show_chart
                 </span>
               </div>
               <div className="flex justify-between items-start mb-6 relative z-10">
                 <div className="flex items-center gap-4">
-                  <div className="w-16 h-16 bg-white rounded-full flex items-center justify-center border-4 border-neo-black">
+                  <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center border-4 border-neo-black">
                     <span className="material-symbols-outlined text-neo-black text-4xl">token</span>
                   </div>
-                  <span className="text-4xl font-display text-white">ETH</span>
+                  <span className="text-4xl font-display text-neo-black/70">ETH</span>
                 </div>
-                <span className="bg-white text-neo-black border-3 border-neo-black px-3 py-1 text-xl font-display uppercase transform -rotate-2">
-                  -0.4%
+                <span className="bg-gray-100 text-neo-black/70 border-3 border-neo-black px-3 py-1 text-xl font-display uppercase transform -rotate-2">
+                  N/A
                 </span>
               </div>
-              <div className="relative z-10 bg-white p-4 border-3 border-neo-black rounded-lg">
+              <div className="relative z-10 bg-gray-100 p-4 border-3 border-neo-black rounded-lg">
                 <p className="text-neo-black/60 text-sm font-bold uppercase mb-1">Current Price</p>
-                <p className="text-4xl lg:text-5xl font-display tracking-tighter">$3,450.00</p>
+                <p className="text-4xl lg:text-5xl font-display tracking-tighter text-neo-black/70">
+                  $3,450.00
+                </p>
               </div>
             </div>
           </div>
@@ -874,12 +980,12 @@ export default function BtcUpDownPage() {
               <div className="grid grid-cols-2 gap-8">
                 <button
                   className={`group relative bg-[#0bda0b] border-5 border-neo-black h-32 flex flex-col items-center justify-center shadow-neo transition-all rounded-xl hover:bg-[#39ff39] ${
-                    betLoading ? 'opacity-60 cursor-not-allowed' : 'active:shadow-none active:translate-x-[8px] active:translate-y-[8px]'
+                    betDisabled ? 'opacity-60 cursor-not-allowed' : 'active:shadow-none active:translate-x-[8px] active:translate-y-[8px]'
                   }`}
                   onClick={() => handlePlaceBet('up')}
                   title={betHint}
                   type="button"
-                  disabled={betLoading}
+                  disabled={betDisabled}
                 >
                   <div className="flex items-center gap-2">
                     <span className="material-symbols-outlined text-neo-black text-5xl font-bold group-hover:-translate-y-2 transition-transform">
@@ -895,12 +1001,12 @@ export default function BtcUpDownPage() {
                 </button>
                 <button
                   className={`group relative bg-[#ff3333] border-5 border-neo-black h-32 flex flex-col items-center justify-center shadow-neo transition-all rounded-xl hover:bg-[#ff5555] ${
-                    betLoading ? 'opacity-60 cursor-not-allowed' : 'active:shadow-none active:translate-x-[8px] active:translate-y-[8px]'
+                    betDisabled ? 'opacity-60 cursor-not-allowed' : 'active:shadow-none active:translate-x-[8px] active:translate-y-[8px]'
                   }`}
                   onClick={() => handlePlaceBet('down')}
                   title={betHint}
                   type="button"
-                  disabled={betLoading}
+                  disabled={betDisabled}
                 >
                   <div className="flex items-center gap-2">
                     <span className="material-symbols-outlined text-white text-5xl font-bold group-hover:translate-y-2 transition-transform">
@@ -970,16 +1076,16 @@ export default function BtcUpDownPage() {
               <div className="flex justify-between items-center border-b-2 border-neo-black/10 pb-3">
                 <span className="text-neo-black/60 text-base font-bold uppercase font-display">Win Rate</span>
                 <span className="font-display text-3xl bg-secondary text-white px-2 transform -rotate-1 border-2 border-neo-black">
-                  68%
+                  {winRateText}
                 </span>
               </div>
               <div className="flex justify-between items-center border-b-2 border-neo-black/10 pb-3">
                 <span className="text-neo-black/60 text-base font-bold uppercase font-display">Total Wagered</span>
-                <span className="font-display text-2xl">12.5 ETH</span>
+                <span className="font-display text-2xl">{totalWageredText}</span>
               </div>
               <div className="flex justify-between items-center pt-1">
                 <span className="text-neo-black/60 text-base font-bold uppercase font-display">Net Profit</span>
-                <span className="font-display text-3xl text-[#0bda0b]">+4.2 ETH</span>
+                <span className={`font-display text-3xl ${netProfitClass}`}>{netProfitText}</span>
               </div>
             </div>
           </div>

@@ -1,7 +1,7 @@
 const { expect } = require('chai');
 const hre = require('hardhat');
 
-const ROUND_SECONDS = 300;
+const ROUND_SECONDS = 3600;
 
 const setTime = async (timestamp) => {
   await hre.network.provider.send('evm_setNextBlockTimestamp', [timestamp]);

@@ -4,8 +4,8 @@ import { FhevmProvider } from './providers/FhevmProvider'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'BTC.UPDOWN5',
-  description: 'Encrypted BTC up/down prediction market demo on FHEVM.',
+  title: 'BTCUPDOWN60',
+  description: 'Encrypted BTC up/down prediction market demo on FHEVM (60-min rounds).',
   icons: {
     icon: '/favicon.svg',
   },

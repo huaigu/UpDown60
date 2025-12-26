@@ -17,7 +17,7 @@ interface AutomationCompatibleInterface {
 }
 
 contract BtcUpDownFHE is ZamaEthereumConfig, AutomationCompatibleInterface {
-    uint256 public constant ROUND_SECONDS = 300;
+    uint256 public constant ROUND_SECONDS = 3600;
 
     enum Result {
         Unknown,
