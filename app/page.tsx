@@ -11,7 +11,7 @@ import FheVoting from '../components/FheVoting';
 // Contract configuration
 const CONTRACT_ADDRESSES = {
   31337: '0x40e8Aa088739445BC3a3727A724F56508899f65B', // Local Hardhat
-  11155111: '0xead137D42d2E6A6a30166EaEf97deBA1C3D1954e', // Sepolia
+  11155111: '0x9AD2CcA4749402C20b2f83D3e8850C2B127b61Dd', // Sepolia
 }
 
 // Sepolia network configuration

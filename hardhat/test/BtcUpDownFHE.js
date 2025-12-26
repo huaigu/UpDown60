@@ -8,6 +8,12 @@ const setTime = async (timestamp) => {
   await hre.network.provider.send('evm_mine');
 };
 
+const encryptDirection = async (contractAddress, user, direction) => {
+  const input = hre.fhevm.createEncryptedInput(contractAddress, user.address);
+  input.add32(direction);
+  return input.encrypt();
+};
+
 async function deployFixture() {
   const [owner, alice, bob] = await hre.ethers.getSigners();
   const feedFactory = await hre.ethers.getContractFactory('MockAggregatorV3');
@@ -44,13 +50,8 @@ describe('BtcUpDownFHE', function () {
 
     const contractAddress = await contract.getAddress();
 
-    const inputAlice = hre.fhevm.createEncryptedInput(contractAddress, alice.address);
-    inputAlice.add32(1);
-    const encryptedAlice = await inputAlice.encrypt();
-
-    const inputBob = hre.fhevm.createEncryptedInput(contractAddress, bob.address);
-    inputBob.add32(0);
-    const encryptedBob = await inputBob.encrypt();
+    const encryptedAlice = await encryptDirection(contractAddress, alice, 1);
+    const encryptedBob = await encryptDirection(contractAddress, bob, 0);
 
     await contract
       .connect(alice)
@@ -83,9 +84,7 @@ describe('BtcUpDownFHE', function () {
     const targetRound = currentRound + 1;
     const contractAddress = await contract.getAddress();
 
-    const input = hre.fhevm.createEncryptedInput(contractAddress, alice.address);
-    input.add32(1);
-    const encrypted = await input.encrypt();
+    const encrypted = await encryptDirection(contractAddress, alice, 1);
 
     await contract
       .connect(alice)
@@ -107,5 +106,143 @@ describe('BtcUpDownFHE', function () {
     const stats = await contract.getUserStats(alice.address);
     expect(stats[1]).to.eq(0n);
     expect(stats[3]).to.eq(stake);
+  });
+
+  it('rejects betting for wrong round or wrong stake', async function () {
+    const { contract, stake, alice } = await deployFixture();
+    const baseTime = 3_000_000;
+    await setTime(baseTime);
+
+    const currentRound = Math.floor(baseTime / ROUND_SECONDS);
+    const targetRound = currentRound + 1;
+    const contractAddress = await contract.getAddress();
+    const encrypted = await encryptDirection(contractAddress, alice, 1);
+
+    await expect(
+      contract
+        .connect(alice)
+        .placeBet(currentRound, encrypted.handles[0], encrypted.inputProof, { value: stake })
+    ).to.be.revertedWith('Bet next round only');
+
+    await expect(
+      contract
+        .connect(alice)
+        .placeBet(targetRound, encrypted.handles[0], encrypted.inputProof, { value: stake - 1n })
+    ).to.be.revertedWith('Incorrect stake');
+  });
+
+  it('prevents double betting in the same round', async function () {
+    const { contract, stake, alice } = await deployFixture();
+    const baseTime = 4_000_000;
+    await setTime(baseTime);
+
+    const currentRound = Math.floor(baseTime / ROUND_SECONDS);
+    const targetRound = currentRound + 1;
+    const contractAddress = await contract.getAddress();
+    const encrypted = await encryptDirection(contractAddress, alice, 1);
+
+    await contract
+      .connect(alice)
+      .placeBet(targetRound, encrypted.handles[0], encrypted.inputProof, { value: stake });
+
+    await expect(
+      contract
+        .connect(alice)
+        .placeBet(targetRound, encrypted.handles[0], encrypted.inputProof, { value: stake })
+    ).to.be.revertedWith('Already bet');
+  });
+
+  it('finalizes via upkeep and rejects stale prices', async function () {
+    const { contract, feed } = await deployFixture();
+    const baseTime = ROUND_SECONDS * 3 + 10;
+    await setTime(baseTime);
+
+    const currentRound = Math.floor(baseTime / ROUND_SECONDS);
+    const targetRound = currentRound - 1;
+
+    await feed.setLatestRoundData(50_000, baseTime - 10_000);
+    await expect(contract.finalizeRound(targetRound)).to.be.revertedWith('Stale price');
+
+    await feed.setLatestRoundData(50_000, baseTime);
+    const [needed, performData] = await contract.checkUpkeep('0x');
+    expect(needed).to.eq(true);
+
+    await expect(contract.performUpkeep(performData))
+      .to.emit(contract, 'RoundFinalized')
+      .withArgs(targetRound, 50_000, 50_000, 3);
+  });
+
+  it('reveals totals, accrues fee, and pays winners correctly', async function () {
+    const { contract, feed, stake, alice, bob } = await deployFixture();
+    const baseTime = 5_000_000;
+    await setTime(baseTime);
+
+    const currentRound = Math.floor(baseTime / ROUND_SECONDS);
+    const targetRound = currentRound + 1;
+    const contractAddress = await contract.getAddress();
+
+    const encryptedAlice = await encryptDirection(contractAddress, alice, 1);
+    const encryptedBob = await encryptDirection(contractAddress, bob, 0);
+
+    await contract
+      .connect(alice)
+      .placeBet(targetRound, encryptedAlice.handles[0], encryptedAlice.inputProof, { value: stake });
+    await contract
+      .connect(bob)
+      .placeBet(targetRound, encryptedBob.handles[0], encryptedBob.inputProof, { value: stake });
+
+    await feed.setLatestRoundData(50_000, baseTime);
+    await contract.finalizeRound(currentRound - 1);
+
+    const endTime = (targetRound + 1) * ROUND_SECONDS + 1;
+    await setTime(endTime);
+    await feed.setLatestRoundData(60_000, endTime);
+    await contract.finalizeRound(targetRound);
+
+    await contract.requestRoundReveal(targetRound);
+    const handles = await contract.getRoundHandles(targetRound);
+    const totalsDecrypt = await hre.fhevm.publicDecrypt([handles[0], handles[1]]);
+    await contract.resolveTotalsCallback(
+      targetRound,
+      totalsDecrypt.abiEncodedClearValues,
+      totalsDecrypt.decryptionProof
+    );
+
+    const fee = (stake * 200n) / 10_000n;
+    expect(await contract.feeAccrued()).to.eq(fee);
+
+    await contract.connect(alice).requestClaim(targetRound);
+    await contract.connect(bob).requestClaim(targetRound);
+
+    const alicePending = await contract.getPendingClaim(targetRound, alice.address);
+    const bobPending = await contract.getPendingClaim(targetRound, bob.address);
+
+    const aliceDecrypt = await hre.fhevm.publicDecrypt([alicePending[1]]);
+    const bobDecrypt = await hre.fhevm.publicDecrypt([bobPending[1]]);
+
+    const expectedPayout = stake * 2n - fee;
+    await expect(
+      contract
+        .connect(alice)
+        .claimCallback(targetRound, aliceDecrypt.abiEncodedClearValues, aliceDecrypt.decryptionProof)
+    )
+      .to.emit(contract, 'ClaimPaid')
+      .withArgs(targetRound, alice.address, expectedPayout);
+
+    await expect(
+      contract
+        .connect(bob)
+        .claimCallback(targetRound, bobDecrypt.abiEncodedClearValues, bobDecrypt.decryptionProof)
+    )
+      .to.emit(contract, 'ClaimPaid')
+      .withArgs(targetRound, bob.address, 0);
+
+    const aliceStats = await contract.getUserStats(alice.address);
+    expect(aliceStats[1]).to.eq(1n);
+    expect(aliceStats[3]).to.eq(expectedPayout);
+
+    const bobStats = await contract.getUserStats(bob.address);
+    expect(bobStats[1]).to.eq(0n);
+    expect(bobStats[3]).to.eq(0n);
   });
 });

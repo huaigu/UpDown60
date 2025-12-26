@@ -1,10 +1,10 @@
-# BTCUPDOWN60 - FHEVM BTC Up/Down Demo
+# BTCUPDOWN60 - FHEVM BTC Up/Down Demo 🚀
 
 A privacy-preserving BTC up/down prediction market built with FHEVM. Users bet only on the next 60-minute round. Stake amount is public, while the direction (up/down) stays encrypted until reveal.
 
 Note: the UI shows a CEX BTC price from Binance for display. The on-chain result uses the Chainlink BTC/USD feed.
 
-## Features
+## Features ✨
 - 60-minute rounds with "next round only" betting
 - Encrypted directions using Zama FHEVM and Relayer SDK
 - Public RPC reads for round state (no wallet required to view)
@@ -12,17 +12,17 @@ Note: the UI shows a CEX BTC price from Binance for display. The on-chain result
 - User stats sourced from contract view functions (getUserStats)
 - Chainlink Automation support for automatic round finalization
 
-## Latest Deployment (Sepolia)
+## Latest Deployment (Sepolia) 🧾
 - Contract: `0x9AD2CcA4749402C20b2f83D3e8850C2B127b61Dd`
 - Chainlink BTC/USD Feed: `0x1b44F3514812d835EB1BDB0acB33d3fA3351Ee43`
 - Public RPC: `https://ethereum-sepolia-rpc.publicnode.com`
 
-## Round Logic
+## Round Logic 🧠
 - Round id is `floor(block.timestamp / ROUND_SECONDS)`.
 - Bets are accepted only for `currentRound + 1`.
 - Finalization compares `endPrice` (current Chainlink price) vs `startPrice` (previous round end price). If equal, result is Tie.
 
-## Core Flow (On-chain)
+## Core Flow (On-chain) 🔒
 
 Actors: User, Contract, Chainlink Feed, Automation
 
@@ -43,7 +43,7 @@ Actors: User, Contract, Chainlink Feed, Automation
 8) claimCallback(roundId, cleartexts, proof)
    - payout transferred
 
-ASCII diagram 1: round timeline + target round
+ASCII diagram 1: round timeline + target round ⏱️
 
 ```
 time ───────────────────────────────────────────────────────────────────────→
@@ -59,7 +59,7 @@ endPrice(N+1)   = Chainlink latest price at finalize
 result          = compare(endPrice, startPrice)
 ```
 
-ASCII diagram 2: on-chain sequence (bet → reveal → claim)
+ASCII diagram 2: on-chain sequence (bet → reveal → claim) 🔁
 
 ```
 User/Wallet        UI/Client            Contract             Chainlink           Relayer/SDK
@@ -89,7 +89,7 @@ User/Wallet        UI/Client            Contract             Chainlink          
     |                 |------------------->| claimCallback -> payout transfer         |
 ```
 
-ASCII diagram 3: frontend data sources
+ASCII diagram 3: frontend data sources 📊
 
 ```
                          ┌──────────────────────────┐
@@ -111,12 +111,12 @@ ASCII diagram 3: frontend data sources
                   localStorage cache        Live Feed table
 ```
 
-## Frontend Data Flow (Read-only)
+## Frontend Data Flow (Read-only) 🌐
 - Public RPC polls: current round, round totals, round result
 - Event logs: BetPlaced / ClaimPaid indexed and cached locally
 - Binance CEX price polled for UI only (not used for on-chain logic)
 
-## Project Structure
+## Project Structure 🧱
 - app/                 Next.js App Router pages and providers
 - components/          Reusable React components
 - src/lib/             FHEVM helpers and encryption utilities
@@ -124,7 +124,7 @@ ASCII diagram 3: frontend data sources
 - fhevm-sdk/           Vendored FHEVM SDK build artifacts
 - types/               Global TypeScript declarations
 
-## Deployment
+## Deployment 🛠️
 1) Set environment variables in `hardhat/.env`:
    - `SEPOLIA_RPC_URL`
    - `SEPOLIA_PRIVATE_KEY`
@@ -136,7 +136,7 @@ ASCII diagram 3: frontend data sources
 4) (Optional) Verify:
    - `cd hardhat && npx hardhat verify --network sepolia <address> <stakeWei> <feeBps> <feeRecipient> <btcUsdFeed> <maxPriceAge>`
 
-## Development
+## Development 🧪
 Root (Next.js):
 - npm install
 - npm run dev
