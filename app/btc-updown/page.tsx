@@ -18,6 +18,8 @@ const CONTRACT_ADDRESSES: Record<number, string> = {
 const CONTRACT_ABI = [
   'event BetPlaced(uint256 indexed roundId, address indexed user, uint64 stake)',
   'event ClaimPaid(uint256 indexed roundId, address indexed user, uint64 payout)',
+  'event RoundInitialized(uint256 indexed roundId, uint256 startTime, uint256 endTime)',
+  'event RoundFinalized(uint256 indexed roundId, int256 startPrice, int256 endPrice, uint8 result)',
   'function stakeAmount() view returns (uint64)',
   'function feeBps() view returns (uint16)',
   'function getCurrentRound() view returns (uint256)',
@@ -77,6 +79,23 @@ const formatPercent = (value: number) => {
   return `${sign}${Math.abs(value).toFixed(2)}%`;
 };
 
+const formatChainlinkPrice = (value?: string | bigint | number | null) => {
+  if (value === null || value === undefined) return '--';
+  const numeric = typeof value === 'bigint' ? Number(value) : Number(value);
+  if (!Number.isFinite(numeric)) return '--';
+  const price = numeric / 1e8;
+  return new Intl.NumberFormat('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(price);
+};
+
+const formatUtcTime = (timestamp?: number | null) => {
+  if (!timestamp) return '--';
+  const date = new Date(timestamp * 1000);
+  return `${date.toISOString().slice(11, 16)} UTC`;
+};
+
 type LocalSubmission = {
   id: string;
   roundId: number;
@@ -87,10 +106,15 @@ type LocalSubmission = {
 
 type FeedEvent = {
   id: string;
-  type: 'bet' | 'claim';
-  user: string;
+  type: 'bet' | 'claim' | 'round-init' | 'round-final';
+  user?: string;
   roundId: number;
-  amountEth: string;
+  amountEth?: string;
+  startTime?: number;
+  endTime?: number;
+  startPrice?: string;
+  endPrice?: string;
+  result?: number;
   txHash: string;
   blockNumber: number;
   logIndex: number;
@@ -438,9 +462,11 @@ export default function BtcUpDownPage() {
             ? lastIndexedBlock + 1
             : Math.max(latestBlock - 2000, 0);
         if (fromBlock > latestBlock) return;
-        const [betEvents, claimEvents] = await Promise.all([
+        const [betEvents, claimEvents, initEvents, finalizeEvents] = await Promise.all([
           contract.queryFilter(contract.filters.BetPlaced(), fromBlock, latestBlock),
           contract.queryFilter(contract.filters.ClaimPaid(), fromBlock, latestBlock),
+          contract.queryFilter(contract.filters.RoundInitialized(), fromBlock, latestBlock),
+          contract.queryFilter(contract.filters.RoundFinalized(), fromBlock, latestBlock),
         ]);
         if (!isActive) return;
         const mapped = [
@@ -460,6 +486,27 @@ export default function BtcUpDownPage() {
             user: event.args?.user as string,
             roundId: Number(event.args?.roundId ?? 0),
             amountEth: ethers.formatEther(event.args?.payout ?? 0n),
+            txHash: event.transactionHash,
+            blockNumber: event.blockNumber ?? 0,
+            logIndex: event.logIndex ?? 0,
+          })),
+          ...initEvents.map((event) => ({
+            id: `${event.transactionHash}-${event.logIndex}`,
+            type: 'round-init' as const,
+            roundId: Number(event.args?.roundId ?? 0),
+            startTime: Number(event.args?.startTime ?? 0),
+            endTime: Number(event.args?.endTime ?? 0),
+            txHash: event.transactionHash,
+            blockNumber: event.blockNumber ?? 0,
+            logIndex: event.logIndex ?? 0,
+          })),
+          ...finalizeEvents.map((event) => ({
+            id: `${event.transactionHash}-${event.logIndex}`,
+            type: 'round-final' as const,
+            roundId: Number(event.args?.roundId ?? 0),
+            startPrice: event.args?.startPrice?.toString?.(),
+            endPrice: event.args?.endPrice?.toString?.(),
+            result: Number(event.args?.result ?? 0),
             txHash: event.transactionHash,
             blockNumber: event.blockNumber ?? 0,
             logIndex: event.logIndex ?? 0,
@@ -698,8 +745,8 @@ export default function BtcUpDownPage() {
   const feedHint = !hasReadContract
     ? 'Contract address missing.'
     : !isConnected
-      ? 'Public RPC active. No on-chain activity yet.'
-      : 'No on-chain activity yet.';
+      ? 'Public RPC active. Round events, bets, and claims appear here.'
+      : 'Round events, bets, and claims appear here.';
   const roundResultId = currentRound && currentRound > 0 ? currentRound - 1 : null;
   const roundResultText = useMemo(() => {
     if (!roundResultId) return 'Round -- Pending';
@@ -715,6 +762,24 @@ export default function BtcUpDownPage() {
       : roundTotals?.result === 2
         ? 'text-[#ff3333]'
         : 'text-white';
+  const getFeedUserLabel = (event: FeedEvent) => {
+    if (event.type === 'bet' || event.type === 'claim') {
+      return formatAddress(event.user || '');
+    }
+    return 'SYSTEM';
+  };
+  const getRoundResultLabel = (value?: number) => {
+    if (value === 1) return 'UP';
+    if (value === 2) return 'DOWN';
+    if (value === 3) return 'TIE';
+    return '--';
+  };
+  const getRoundResultClass = (value?: number) => {
+    if (value === 1) return 'bg-[#0bda0b] text-white';
+    if (value === 2) return 'bg-[#ff3333] text-white';
+    if (value === 3) return 'bg-gray-300 text-neo-black';
+    return 'bg-white text-neo-black';
+  };
   const winRateText = userStats
     ? userStats.totalBets > 0
       ? `${Math.round((userStats.totalWins / userStats.totalBets) * 100)}%`
@@ -1098,7 +1163,7 @@ export default function BtcUpDownPage() {
             </div>
             <div className="flex-grow overflow-y-auto custom-scrollbar bg-white">
               <div className="px-4 py-3 text-xs font-display uppercase text-neo-black/60 border-b-2 border-neo-black/10">
-                Directions stay encrypted until reveal.
+                Round events and user activity stream here. Directions stay encrypted until reveal.
               </div>
               <table className="w-full text-left border-collapse">
                 <thead className="sticky top-0 bg-gray-100 z-10 border-b-4 border-neo-black shadow-sm">
@@ -1110,30 +1175,65 @@ export default function BtcUpDownPage() {
                 </thead>
                 <tbody className="text-base font-medium">
                   {displayFeedEvents.length ? (
-                    displayFeedEvents.map((event) => (
-                      <tr
-                        className="border-b-2 border-neo-black/10 hover:bg-yellow-50 transition-colors"
-                        key={event.id}
-                      >
-                        <td className="p-4 font-mono font-bold text-neo-black/80">
-                          {formatAddress(event.user)}
-                        </td>
-                        <td className="p-4 text-center">
-                          <span
-                            className={
-                              event.type === 'claim'
-                                ? 'bg-primary text-neo-black text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase'
-                                : 'bg-neo-black text-white text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase'
-                            }
-                          >
-                            {event.type === 'claim' ? 'CLAIM' : 'BET'}
-                          </span>
-                        </td>
-                        <td className="p-4 text-right font-display">
-                          {formatEthValue(event.amountEth)} ETH
-                        </td>
-                      </tr>
-                    ))
+                    displayFeedEvents.map((event) => {
+                      const isRoundEvent = event.type === 'round-init' || event.type === 'round-final';
+                      const actionLabel =
+                        event.type === 'bet'
+                          ? 'BET'
+                          : event.type === 'claim'
+                            ? 'CLAIM'
+                            : event.type === 'round-init'
+                              ? 'ROUND INIT'
+                              : `FINAL ${getRoundResultLabel(event.result)}`;
+                      const actionClass =
+                        event.type === 'bet'
+                          ? 'bg-neo-black text-white'
+                          : event.type === 'claim'
+                            ? 'bg-primary text-neo-black'
+                            : event.type === 'round-init'
+                              ? 'bg-secondary text-white'
+                              : getRoundResultClass(event.result);
+
+                      return (
+                        <tr
+                          className="border-b-2 border-neo-black/10 hover:bg-yellow-50 transition-colors"
+                          key={event.id}
+                        >
+                          <td className="p-4 font-mono font-bold text-neo-black/80">
+                            {getFeedUserLabel(event)}
+                          </td>
+                          <td className="p-4 text-center">
+                            <span
+                              className={`${actionClass} text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase`}
+                            >
+                              {actionLabel}
+                            </span>
+                          </td>
+                          <td className="p-4 text-right font-display">
+                            {isRoundEvent ? (
+                              <div className="flex flex-col items-end gap-1">
+                                <span className="text-sm font-display uppercase">
+                                  Round #{event.roundId}
+                                </span>
+                                {event.type === 'round-init' ? (
+                                  <span className="text-xs text-neo-black/60 uppercase">
+                                    Start {formatUtcTime(event.startTime)} / End{' '}
+                                    {formatUtcTime(event.endTime)}
+                                  </span>
+                                ) : (
+                                  <span className="text-xs text-neo-black/60 uppercase">
+                                    Start ${formatChainlinkPrice(event.startPrice)} / End $
+                                    {formatChainlinkPrice(event.endPrice)}
+                                  </span>
+                                )}
+                              </div>
+                            ) : (
+                              `${formatEthValue(event.amountEth || '0')} ETH`
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })
                   ) : (
                     <tr>
                       <td
