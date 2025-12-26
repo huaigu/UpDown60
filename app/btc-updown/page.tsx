@@ -61,8 +61,15 @@ const STAKE_ETH = '0.01';
 const LOCAL_SUBMISSIONS_KEY = 'btcUpDownLocalSubmissions';
 const LOCAL_FEED_KEY = 'btcUpDownLiveFeed';
 const LOCAL_FEED_BLOCK_KEY = 'btcUpDownLiveFeedLastBlock';
+const LOCAL_DEPLOY_BLOCK_KEY = 'btcUpDownDeployBlock';
+const SEPOLIA_TX_URL = 'https://sepolia.etherscan.io/tx/';
 
 const formatAddress = (value: string) => {
+  if (!value) return '';
+  return `${value.slice(0, 6)}...${value.slice(-4)}`;
+};
+
+const formatTxHash = (value?: string | null) => {
   if (!value) return '';
   return `${value.slice(0, 6)}...${value.slice(-4)}`;
 };
@@ -90,10 +97,13 @@ const formatChainlinkPrice = (value?: string | bigint | number | null) => {
   }).format(price);
 };
 
-const formatUtcTime = (timestamp?: number | null) => {
+const formatLocalTime = (timestamp?: number | null) => {
   if (!timestamp) return '--';
   const date = new Date(timestamp * 1000);
-  return `${date.toISOString().slice(11, 16)} UTC`;
+  return new Intl.DateTimeFormat(undefined, {
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date);
 };
 
 type LocalSubmission = {
@@ -102,6 +112,7 @@ type LocalSubmission = {
   direction: 'up' | 'down';
   timestamp: number;
   address?: string;
+  txHash?: string;
 };
 
 type FeedEvent = {
@@ -118,6 +129,15 @@ type FeedEvent = {
   txHash: string;
   blockNumber: number;
   logIndex: number;
+};
+
+type ClaimRoundMeta = {
+  resultSet: boolean;
+  totalsRevealed: boolean;
+  result: number;
+  betExists: boolean;
+  claimRequested: boolean;
+  claimed: boolean;
 };
 
 type RoundTotals = {
@@ -162,6 +182,13 @@ export default function BtcUpDownPage() {
   const [betLoading, setBetLoading] = useState(false);
   const [betLoadingText, setBetLoadingText] = useState('');
   const [hasActiveBet, setHasActiveBet] = useState(false);
+  const [claimingRoundId, setClaimingRoundId] = useState<number | null>(null);
+  const [claimStatusByRound, setClaimStatusByRound] = useState<Record<number, string>>({});
+  const [claimErrorByRound, setClaimErrorByRound] = useState<Record<number, string>>({});
+  const [claimMetaByRound, setClaimMetaByRound] = useState<Record<number, ClaimRoundMeta>>({});
+  const [deploymentBlock, setDeploymentBlock] = useState<number | null>(null);
+  const [feedSyncStatus, setFeedSyncStatus] = useState('');
+  const [feedSyncProgress, setFeedSyncProgress] = useState<number | null>(null);
   const [userStats, setUserStats] = useState<{
     totalBets: number;
     totalWins: number;
@@ -171,6 +198,7 @@ export default function BtcUpDownPage() {
   const [btcPrice, setBtcPrice] = useState<string | null>(null);
   const [btcChangePct, setBtcChangePct] = useState<number | null>(null);
   const btcPriceRef = useRef<number | null>(null);
+  const deployBlockLookupRef = useRef(false);
   const [blockTimestamp, setBlockTimestamp] = useState<number | null>(null);
   const [blockFetchedAt, setBlockFetchedAt] = useState<number | null>(null);
   const [clientNow, setClientNow] = useState(0);
@@ -186,6 +214,15 @@ export default function BtcUpDownPage() {
     if (!readContractAddress || readContractAddress === ethers.ZeroAddress) return '';
     return `${LOCAL_FEED_KEY}:${readChainId}:${readContractAddress.toLowerCase()}`;
   }, [readChainId, readContractAddress]);
+  const deployBlockKey = useMemo(() => {
+    if (!readContractAddress || readContractAddress === ethers.ZeroAddress) return '';
+    return `${LOCAL_DEPLOY_BLOCK_KEY}:${readChainId}:${readContractAddress.toLowerCase()}`;
+  }, [readChainId, readContractAddress]);
+  const localSubmissionsKey = useMemo(() => {
+    if (!readContractAddress || readContractAddress === ethers.ZeroAddress) return '';
+    const owner = address ? address.toLowerCase() : 'anon';
+    return `${LOCAL_SUBMISSIONS_KEY}:${readChainId}:${readContractAddress.toLowerCase()}:${owner}`;
+  }, [address, readChainId, readContractAddress]);
   const feedBlockKey = feedStorageKey ? `${feedStorageKey}:${LOCAL_FEED_BLOCK_KEY}` : '';
   const totalsRevealed = roundTotals?.totalsRevealed ?? false;
   const isPendingReveal = !roundTotals || !roundTotals.totalsRevealed || !roundTotals.resultSet;
@@ -207,23 +244,47 @@ export default function BtcUpDownPage() {
   }, []);
 
   useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const stored = window.localStorage.getItem(LOCAL_SUBMISSIONS_KEY);
-    if (!stored) return;
-    try {
-      const parsed = JSON.parse(stored) as LocalSubmission[];
-      if (Array.isArray(parsed)) {
-        setLocalSubmissions(parsed);
+    if (typeof window === 'undefined' || !localSubmissionsKey) return;
+    const stored = window.localStorage.getItem(localSubmissionsKey);
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored) as LocalSubmission[];
+        if (Array.isArray(parsed)) {
+          setLocalSubmissions(parsed);
+          return;
+        }
+      } catch (err) {
+        console.warn('Failed to parse local submissions cache', err);
       }
-    } catch (err) {
-      console.warn('Failed to parse local submissions cache', err);
     }
-  }, []);
+    if (address) {
+      const legacy = window.localStorage.getItem(LOCAL_SUBMISSIONS_KEY);
+      if (legacy) {
+        try {
+          const parsed = JSON.parse(legacy) as LocalSubmission[];
+          if (Array.isArray(parsed)) {
+            const filtered = parsed.filter(
+              (item) => item.address?.toLowerCase() === address.toLowerCase()
+            );
+            if (filtered.length) {
+              setLocalSubmissions(filtered);
+              window.localStorage.setItem(localSubmissionsKey, JSON.stringify(filtered));
+              return;
+            }
+          }
+        } catch (err) {
+          console.warn('Failed to parse legacy submissions cache', err);
+        }
+      }
+    }
+    setLocalSubmissions([]);
+  }, [localSubmissionsKey, address]);
 
   useEffect(() => {
-    if (typeof window === 'undefined') return;
-    window.localStorage.setItem(LOCAL_SUBMISSIONS_KEY, JSON.stringify(localSubmissions));
-  }, [localSubmissions]);
+    if (typeof window === 'undefined' || !localSubmissionsKey) return;
+    window.localStorage.setItem(localSubmissionsKey, JSON.stringify(localSubmissions));
+  }, [localSubmissions, localSubmissionsKey]);
+
 
   useEffect(() => {
     if (typeof window === 'undefined' || !feedStorageKey) return;
@@ -251,6 +312,21 @@ export default function BtcUpDownPage() {
       setLastIndexedBlock(null);
     }
   }, [feedStorageKey, feedBlockKey]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !deployBlockKey) return;
+    setDeploymentBlock(null);
+    const stored = window.localStorage.getItem(deployBlockKey);
+    if (stored) {
+      const parsed = Number(stored);
+      setDeploymentBlock(Number.isNaN(parsed) ? null : parsed);
+    }
+  }, [deployBlockKey]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !deployBlockKey || deploymentBlock === null) return;
+    window.localStorage.setItem(deployBlockKey, String(deploymentBlock));
+  }, [deployBlockKey, deploymentBlock]);
 
   useEffect(() => {
     if (typeof window === 'undefined' || !feedStorageKey) return;
@@ -333,6 +409,73 @@ export default function BtcUpDownPage() {
       window.clearInterval(interval);
     };
   }, [hasReadContract, readContractAddress, readProvider]);
+
+  useEffect(() => {
+    if (!hasReadContract) {
+      setClaimMetaByRound({});
+      return;
+    }
+    const rounds = Array.from(new Set(localSubmissions.map((submission) => submission.roundId)));
+    if (!rounds.length) {
+      setClaimMetaByRound({});
+      return;
+    }
+    let isActive = true;
+    const addressLower = address?.toLowerCase() || '';
+    const roundsForUser = addressLower
+      ? rounds.filter((roundId) =>
+          localSubmissions.some(
+            (submission) =>
+              submission.roundId === roundId &&
+              submission.address?.toLowerCase() === addressLower
+          )
+        )
+      : [];
+
+    const loadClaimMeta = async () => {
+      try {
+        const contract = getReadContract();
+        const entries = await Promise.all(
+          rounds.map(async (roundId) => {
+            const state = await contract.getRoundState(roundId);
+            let betInfo = null;
+            if (roundsForUser.includes(roundId) && addressLower) {
+              betInfo = await contract.getBet(roundId, address);
+            }
+            return [
+              roundId,
+              {
+                resultSet: state[6],
+                totalsRevealed: state[8],
+                result: Number(state[5]),
+                betExists: betInfo ? betInfo[0] : false,
+                claimRequested: betInfo ? betInfo[2] : false,
+                claimed: betInfo ? betInfo[3] : false,
+              },
+            ];
+          })
+        );
+        if (!isActive) return;
+        setClaimMetaByRound((prev) => {
+          const next = { ...prev };
+          entries.forEach(([roundId, meta]) => {
+            next[roundId] = meta;
+          });
+          return next;
+        });
+      } catch (err) {
+        if (!isActive) return;
+        console.warn('Failed to load claim metadata', err);
+      }
+    };
+
+    loadClaimMeta();
+    const interval = window.setInterval(loadClaimMeta, 15000);
+    return () => {
+      isActive = false;
+      window.clearInterval(interval);
+    };
+  }, [hasReadContract, localSubmissions, address, readProvider, readContractAddress]);
 
   useEffect(() => {
     let isActive = true;
@@ -447,6 +590,7 @@ export default function BtcUpDownPage() {
     setStakeAmount(null);
     setFeedEvents([]);
     setLastIndexedBlock(null);
+    setDeploymentBlock(null);
   }, [hasReadContract]);
 
   useEffect(() => {
@@ -454,13 +598,61 @@ export default function BtcUpDownPage() {
     let isActive = true;
     const contract = new ethers.Contract(readContractAddress, CONTRACT_ABI, readProvider);
 
+    const resolveDeploymentBlock = async (latestBlock: number) => {
+      if (deploymentBlock !== null) return deploymentBlock;
+      if (deployBlockLookupRef.current) return null;
+      deployBlockLookupRef.current = true;
+      try {
+        const codeLatest = await publicProvider.getCode(readContractAddress, latestBlock);
+        if (!codeLatest || codeLatest === '0x') {
+          console.warn('No contract code found for address');
+          return null;
+        }
+        let low = 0;
+        let high = latestBlock;
+        while (low + 1 < high) {
+          const mid = Math.floor((low + high) / 2);
+          const code = await publicProvider.getCode(readContractAddress, mid);
+          if (!code || code === '0x') {
+            low = mid;
+          } else {
+            high = mid;
+          }
+        }
+        setDeploymentBlock(high);
+        return high;
+      } catch (err) {
+        console.warn('Failed to resolve deployment block', err);
+        return null;
+      } finally {
+        deployBlockLookupRef.current = false;
+      }
+    };
+
     const syncFeed = async () => {
       try {
+        setFeedSyncStatus('Syncing live feed...');
+        setFeedSyncProgress(null);
         const latestBlock = await readProvider.getBlockNumber();
-        const fromBlock =
-          lastIndexedBlock !== null
-            ? lastIndexedBlock + 1
-            : Math.max(latestBlock - 2000, 0);
+        let fromBlock: number | null = null;
+        if (lastIndexedBlock !== null) {
+          fromBlock = Math.max(lastIndexedBlock - 50, 0);
+        } else {
+          setFeedSyncStatus('Syncing history from deployment...');
+          const deployBlock = await resolveDeploymentBlock(latestBlock);
+          if (deployBlock === null) {
+            setFeedSyncStatus('Feed sync paused (deployment block unavailable).');
+            return;
+          }
+          fromBlock = deployBlock;
+        }
+        if (fromBlock !== null && latestBlock > fromBlock) {
+          const progress = Math.min(
+            100,
+            Math.round(((latestBlock - fromBlock) / Math.max(latestBlock, 1)) * 100)
+          );
+          setFeedSyncProgress(progress);
+        }
         if (fromBlock > latestBlock) return;
         const [betEvents, claimEvents, initEvents, finalizeEvents] = await Promise.all([
           contract.queryFilter(contract.filters.BetPlaced(), fromBlock, latestBlock),
@@ -530,8 +722,11 @@ export default function BtcUpDownPage() {
           });
         }
         setLastIndexedBlock(latestBlock);
+        setFeedSyncStatus('');
+        setFeedSyncProgress(null);
       } catch (err) {
         console.warn('Failed to sync live feed', err);
+        setFeedSyncStatus('Live feed sync failed. Retrying...');
       }
     };
 
@@ -547,6 +742,8 @@ export default function BtcUpDownPage() {
     readProvider,
     feedStorageKey,
     lastIndexedBlock,
+    deploymentBlock,
+    publicProvider,
   ]);
 
   const ensureSepolia = async () => {
@@ -585,7 +782,11 @@ export default function BtcUpDownPage() {
     return new ethers.Contract(addressOverride || contractAddress, CONTRACT_ABI, signer);
   };
 
-  const handleLocalSubmit = (directionValue: 'up' | 'down', roundIdOverride?: number) => {
+  const handleLocalSubmit = (
+    directionValue: 'up' | 'down',
+    roundIdOverride?: number,
+    txHash?: string
+  ) => {
     const targetRound =
       roundIdOverride ?? Math.floor(Date.now() / 1000 / ROUND_SECONDS) + 1;
     const newSubmission: LocalSubmission = {
@@ -594,6 +795,7 @@ export default function BtcUpDownPage() {
       direction: directionValue,
       timestamp: Date.now(),
       address: address || undefined,
+      txHash,
     };
     setLocalSubmissions((prev) => [newSubmission, ...prev].slice(0, 6));
   };
@@ -651,13 +853,105 @@ export default function BtcUpDownPage() {
       setBetLoadingText('Submitting bet...');
       const tx = await contract.placeBet(targetRound, encryptedData, proof, { value });
       await tx.wait();
-      handleLocalSubmit(directionValue, targetRound);
+      handleLocalSubmit(directionValue, targetRound, tx.hash);
       setHasActiveBet(true);
     } catch (err: any) {
       setActionError(err?.message || 'Bet failed');
     } finally {
       setBetLoading(false);
       setBetLoadingText('');
+    }
+  };
+
+  const handleClaimForRound = async (roundId: number) => {
+    setClaimErrorByRound((prev) => ({ ...prev, [roundId]: '' }));
+    if (claimingRoundId !== null) return;
+    setClaimingRoundId(roundId);
+    setClaimStatusByRound((prev) => ({ ...prev, [roundId]: 'Preparing claim...' }));
+    try {
+      if (!window.ethereum) {
+        throw new Error('No wallet found');
+      }
+      if (!isConnected) {
+        setClaimStatusByRound((prev) => ({ ...prev, [roundId]: 'Connecting wallet...' }));
+        await handleConnect();
+      }
+      const accounts = await window.ethereum.request({ method: 'eth_accounts' });
+      const userAddress = accounts?.[0];
+      if (!userAddress) {
+        throw new Error('Wallet not connected');
+      }
+      const chainIdHex = await window.ethereum.request({ method: 'eth_chainId' });
+      const connectedChainId = parseInt(chainIdHex, 16);
+      if (connectedChainId !== SEPOLIA_CHAIN_ID) {
+        throw new Error('Switch to Sepolia to claim');
+      }
+      const addressForChain = CONTRACT_ADDRESSES[connectedChainId] || '';
+      if (!addressForChain || addressForChain === ethers.ZeroAddress) {
+        throw new Error('Contract address missing');
+      }
+      if (!isInitialized) {
+        setClaimStatusByRound((prev) => ({ ...prev, [roundId]: 'Initializing FHEVM...' }));
+        await initialize();
+      }
+
+      const readContract = getReadContract();
+      let pending = await readContract.getPendingClaim(roundId, userAddress);
+      if (!pending[0]) {
+        setClaimStatusByRound((prev) => ({ ...prev, [roundId]: 'Requesting claim...' }));
+        const contract = await getWriteContract(addressForChain);
+        const tx = await contract.requestClaim(roundId);
+        await tx.wait();
+        pending = await readContract.getPendingClaim(roundId, userAddress);
+      }
+
+      if (!pending[0]) {
+        setClaimStatusByRound((prev) => ({ ...prev, [roundId]: 'Claim completed' }));
+        setClaimMetaByRound((prev) => {
+          const existing = prev[roundId];
+          if (!existing) return prev;
+          return { ...prev, [roundId]: { ...existing, claimed: true } };
+        });
+        return;
+      }
+      const pendingHandle = pending[1];
+      if (!pendingHandle || pendingHandle === ethers.ZeroHash) {
+        setClaimStatusByRound((prev) => ({ ...prev, [roundId]: 'Claim submitted' }));
+        return;
+      }
+
+      setClaimStatusByRound((prev) => ({ ...prev, [roundId]: 'Decrypting payout...' }));
+      const result = await fetchPublicDecryption([pendingHandle]);
+      let cleartexts = result?.abiEncodedClearValues;
+      if (!cleartexts) {
+        const clearValues = result?.clearValues || {};
+        const rawValue = clearValues[pendingHandle] ?? Object.values(clearValues)[0];
+        const payout = typeof rawValue === 'bigint' ? rawValue : BigInt(rawValue || 0);
+        const abiCoder = ethers.AbiCoder.defaultAbiCoder();
+        cleartexts = abiCoder.encode(['uint64'], [payout]);
+      }
+      const proof = result?.decryptionProof;
+      if (!proof) {
+        throw new Error('Missing decryption proof');
+      }
+
+      setClaimStatusByRound((prev) => ({ ...prev, [roundId]: 'Submitting claim...' }));
+      const contract = await getWriteContract(addressForChain);
+      const claimTx = await contract.claimCallback(roundId, cleartexts, proof);
+      await claimTx.wait();
+      setClaimStatusByRound((prev) => ({ ...prev, [roundId]: 'Claim completed' }));
+      setClaimMetaByRound((prev) => {
+        const existing = prev[roundId];
+        if (!existing) return prev;
+        return { ...prev, [roundId]: { ...existing, claimed: true } };
+      });
+    } catch (err: any) {
+      setClaimErrorByRound((prev) => ({
+        ...prev,
+        [roundId]: err?.message || 'Claim failed',
+      }));
+    } finally {
+      setClaimingRoundId(null);
     }
   };
 
@@ -741,9 +1035,11 @@ export default function BtcUpDownPage() {
   }, [blockTimestamp, blockFetchedAt, clientNow]);
   const displaySubmissions = localSubmissions.slice(0, 3);
   const displayRoundId = currentRound ?? 9284;
-  const displayFeedEvents = feedEvents.slice(0, 6);
+  const displayFeedEvents = feedEvents.slice(0, 10);
   const feedHint = !hasReadContract
     ? 'Contract address missing.'
+    : feedSyncStatus
+      ? feedSyncStatus
     : !isConnected
       ? 'Public RPC active. Round events, bets, and claims appear here.'
       : 'Round events, bets, and claims appear here.';
@@ -1100,30 +1396,133 @@ export default function BtcUpDownPage() {
                 </div>
                 {displaySubmissions.length ? (
                   <div className="mt-3 space-y-2">
-                    {displaySubmissions.map((submission) => (
-                      <div
-                        className="flex items-center justify-between bg-white border-2 border-neo-black px-3 py-2 rounded-lg"
-                        key={submission.id}
-                      >
-                        <span className="text-sm font-display uppercase">
-                          Round #{submission.roundId}
-                        </span>
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs font-mono text-neo-black/70">
-                            {submission.address ? formatAddress(submission.address) : 'Local'}
-                          </span>
-                          <span
-                            className={
-                              submission.direction === 'up'
-                                ? 'bg-[#0bda0b] text-white text-xs font-display px-2 py-1 border-2 border-neo-black uppercase shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
-                                : 'bg-[#ff3333] text-white text-xs font-display px-2 py-1 border-2 border-neo-black uppercase shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
-                            }
-                          >
-                            {submission.direction.toUpperCase()}
-                          </span>
+                    {displaySubmissions.map((submission) => {
+                      const meta = claimMetaByRound[submission.roundId];
+                      const addressLower = submission.address?.toLowerCase() || '';
+                      const currentAddressLower = address?.toLowerCase() || '';
+                      const hasActiveWallet = isConnected && !!currentAddressLower;
+                      const isSameWallet = hasActiveWallet && !!addressLower && addressLower === currentAddressLower;
+                      const canClaimBase = isSameWallet && isOnSepolia && hasContract;
+                      const claimInFlight = claimingRoundId === submission.roundId;
+
+                      let claimLabel = 'Pending';
+                      let claimEnabled = false;
+                      let claimBadgeClass = 'bg-gray-200 text-neo-black';
+
+                      if (!hasActiveWallet) {
+                        claimLabel = 'Connect wallet';
+                      } else if (!submission.address) {
+                        claimLabel = 'No wallet';
+                      } else if (!isSameWallet) {
+                        claimLabel = 'Wallet mismatch';
+                      } else if (!meta) {
+                        claimLabel = 'Checking...';
+                      } else if (!meta.betExists) {
+                        claimLabel = 'No bet';
+                      } else if (meta.claimed) {
+                        claimLabel = 'Claimed';
+                        claimBadgeClass = 'bg-primary text-neo-black';
+                      } else if (!meta.resultSet) {
+                        claimLabel = 'Result pending';
+                      } else if (meta.result === 3) {
+                        claimLabel = meta.claimRequested ? 'Finalize' : 'Claim';
+                        claimEnabled = canClaimBase;
+                        claimBadgeClass = 'bg-secondary text-white';
+                      } else {
+                        const isWinner =
+                          (meta.result === 1 && submission.direction === 'up') ||
+                          (meta.result === 2 && submission.direction === 'down');
+                        if (!isWinner) {
+                          claimLabel = 'Lost';
+                        } else if (!meta.totalsRevealed) {
+                          claimLabel = 'Reveal pending';
+                        } else {
+                          claimLabel = meta.claimRequested ? 'Finalize' : 'Claim';
+                          claimEnabled = canClaimBase;
+                          claimBadgeClass = 'bg-secondary text-white';
+                        }
+                      }
+
+                      const claimStatus = claimStatusByRound[submission.roundId];
+                      const claimError = claimErrorByRound[submission.roundId];
+                      const txHash = submission.txHash;
+
+                      return (
+                        <div
+                          className="flex items-center justify-between bg-white border-2 border-neo-black px-3 py-2 rounded-lg"
+                          key={submission.id}
+                        >
+                          <div className="flex flex-col">
+                            <span className="text-sm font-display uppercase">
+                              Round #{submission.roundId}
+                            </span>
+                            <span className="text-xs text-neo-black/60 uppercase flex items-center gap-1 whitespace-nowrap">
+                              <span className="material-symbols-outlined text-[14px]">
+                                schedule
+                              </span>
+                              {formatLocalTime(submission.roundId * ROUND_SECONDS)}-
+                              {formatLocalTime(submission.roundId * ROUND_SECONDS + ROUND_SECONDS)}
+                            </span>
+                          </div>
+                          <div className="flex flex-col items-end gap-1">
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs font-mono text-neo-black/70">
+                                {submission.address ? formatAddress(submission.address) : 'Local'}
+                              </span>
+                              <span
+                                className={
+                                  submission.direction === 'up'
+                                    ? 'bg-[#0bda0b] text-white text-xs font-display px-2 py-1 border-2 border-neo-black uppercase shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
+                                    : 'bg-[#ff3333] text-white text-xs font-display px-2 py-1 border-2 border-neo-black uppercase shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
+                                }
+                              >
+                                {submission.direction.toUpperCase()}
+                              </span>
+                              {claimEnabled ? (
+                                <button
+                                  className={`px-2 py-1 text-xs font-display uppercase border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] transition-all ${
+                                    claimInFlight
+                                      ? 'bg-gray-200 text-neo-black cursor-not-allowed'
+                                      : `${claimBadgeClass} hover:translate-x-[1px] hover:translate-y-[1px] hover:shadow-none`
+                                  }`}
+                                  disabled={claimInFlight}
+                                  onClick={() => handleClaimForRound(submission.roundId)}
+                                  type="button"
+                                >
+                                  {claimInFlight ? 'Claiming...' : claimLabel}
+                                </button>
+                              ) : (
+                                <span
+                                  className={`px-2 py-1 text-xs font-display uppercase border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] ${claimBadgeClass}`}
+                                >
+                                  {claimLabel}
+                                </span>
+                              )}
+                            </div>
+                            {claimStatus ? (
+                              <span className="text-[10px] text-neo-black/60 uppercase">
+                                {claimStatus}
+                              </span>
+                            ) : null}
+                            {txHash ? (
+                              <a
+                                className="text-[10px] text-neo-black/60 uppercase hover:text-neo-black font-mono"
+                                href={`${SEPOLIA_TX_URL}${txHash}`}
+                                rel="noreferrer"
+                                target="_blank"
+                              >
+                                Tx {formatTxHash(txHash)}
+                              </a>
+                            ) : null}
+                            {claimError ? (
+                              <span className="text-[10px] text-[#ff3333] uppercase">
+                                {claimError}
+                              </span>
+                            ) : null}
+                          </div>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 ) : (
                   <p className="mt-3 text-sm text-neo-black/60">No local submissions yet.</p>
@@ -1162,18 +1561,25 @@ export default function BtcUpDownPage() {
               </div>
             </div>
             <div className="flex-grow overflow-y-auto custom-scrollbar bg-white">
-              <div className="px-4 py-3 text-xs font-display uppercase text-neo-black/60 border-b-2 border-neo-black/10">
-                Round events and user activity stream here. Directions stay encrypted until reveal.
+              <div className="px-4 py-3 text-xs font-display uppercase text-neo-black/60 border-b-2 border-neo-black/10 flex flex-col gap-1">
+                <span>
+                  Round events and user activity stream here. Directions stay encrypted until reveal.
+                </span>
+                {feedSyncProgress !== null ? (
+                  <span className="text-[10px] text-neo-black/50">
+                    Sync progress: {feedSyncProgress}%
+                  </span>
+                ) : null}
               </div>
-              <table className="w-full text-left border-collapse">
+              <table className="w-full text-left border-collapse table-fixed">
                 <thead className="sticky top-0 bg-gray-100 z-10 border-b-4 border-neo-black shadow-sm">
                   <tr>
-                    <th className="p-4 text-sm font-display uppercase text-neo-black">User</th>
-                    <th className="p-4 text-sm font-display uppercase text-neo-black text-center">Action</th>
-                    <th className="p-4 text-sm font-display uppercase text-neo-black text-right">Amount</th>
+                    <th className="p-3 text-xs font-display uppercase text-neo-black w-24">User</th>
+                    <th className="p-3 text-xs font-display uppercase text-neo-black text-center w-28">Action</th>
+                    <th className="p-4 text-xs font-display uppercase text-neo-black text-right">Amount</th>
                   </tr>
                 </thead>
-                <tbody className="text-base font-medium">
+                <tbody className="text-sm font-medium">
                   {displayFeedEvents.length ? (
                     displayFeedEvents.map((event) => {
                       const isRoundEvent = event.type === 'round-init' || event.type === 'round-final';
@@ -1199,16 +1605,16 @@ export default function BtcUpDownPage() {
                           className="border-b-2 border-neo-black/10 hover:bg-yellow-50 transition-colors"
                           key={event.id}
                         >
-                          <td className="p-4 font-mono font-bold text-neo-black/80">
-                            {getFeedUserLabel(event)}
-                          </td>
-                          <td className="p-4 text-center">
-                            <span
-                              className={`${actionClass} text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase`}
-                            >
-                              {actionLabel}
-                            </span>
-                          </td>
+                        <td className="p-3 font-mono font-bold text-neo-black/80">
+                          {getFeedUserLabel(event)}
+                        </td>
+                        <td className="p-3 text-center">
+                          <span
+                            className={`${actionClass} text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase whitespace-nowrap`}
+                          >
+                            {actionLabel}
+                          </span>
+                        </td>
                           <td className="p-4 text-right font-display">
                             {isRoundEvent ? (
                               <div className="flex flex-col items-end gap-1">
@@ -1216,15 +1622,23 @@ export default function BtcUpDownPage() {
                                   Round #{event.roundId}
                                 </span>
                                 {event.type === 'round-init' ? (
-                                  <span className="text-xs text-neo-black/60 uppercase">
-                                    Start {formatUtcTime(event.startTime)} / End{' '}
-                                    {formatUtcTime(event.endTime)}
-                                  </span>
+                                  <div className="flex items-center gap-1 text-xs text-neo-black/60 uppercase whitespace-nowrap">
+                                    <span className="material-symbols-outlined text-[14px]">
+                                      schedule
+                                    </span>
+                                    <span>
+                                      {formatLocalTime(event.startTime)}-{formatLocalTime(event.endTime)}
+                                    </span>
+                                  </div>
                                 ) : (
-                                  <span className="text-xs text-neo-black/60 uppercase">
-                                    Start ${formatChainlinkPrice(event.startPrice)} / End $
-                                    {formatChainlinkPrice(event.endPrice)}
-                                  </span>
+                                  <div className="flex items-center gap-1 text-xs text-neo-black/60 uppercase whitespace-nowrap">
+                                    <span className="material-symbols-outlined text-[14px]">
+                                      paid
+                                    </span>
+                                    <span>
+                                      ${formatChainlinkPrice(event.startPrice)}-${formatChainlinkPrice(event.endPrice)}
+                                    </span>
+                                  </div>
                                 )}
                               </div>
                             ) : (
