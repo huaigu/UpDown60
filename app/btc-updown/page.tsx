@@ -1061,15 +1061,42 @@ export default function BtcUpDownPage() {
   ) => {
     const targetRound =
       roundIdOverride ?? Math.floor(Date.now() / 1000 / ROUND_SECONDS) + 1;
-    const newSubmission: LocalSubmission = {
-      id: `${targetRound}-${Date.now()}`,
-      roundId: targetRound,
-      direction: directionValue,
-      timestamp: Date.now(),
-      address: address || undefined,
-      txHash,
-    };
-    setLocalSubmissions((prev) => [newSubmission, ...prev].slice(0, 6));
+    const owner = normalizeAddress(address || '');
+    const txKey = normalizeAddress(txHash);
+    setLocalSubmissions((prev) => {
+      if (txKey && prev.some((item) => normalizeAddress(item.txHash) === txKey)) {
+        return prev;
+      }
+      const existingIndex = prev.findIndex(
+        (item) => item.roundId === targetRound && normalizeAddress(item.address) === owner
+      );
+      if (existingIndex !== -1) {
+        const existing = prev[existingIndex];
+        const nextItem = {
+          ...existing,
+          direction: directionValue,
+          txHash: txHash || existing.txHash,
+          address: existing.address || address || undefined,
+        };
+        const changed =
+          nextItem.direction !== existing.direction ||
+          nextItem.txHash !== existing.txHash ||
+          nextItem.address !== existing.address;
+        if (!changed) return prev;
+        const next = [...prev];
+        next[existingIndex] = nextItem;
+        return next;
+      }
+      const newSubmission: LocalSubmission = {
+        id: `${targetRound}-${Date.now()}`,
+        roundId: targetRound,
+        direction: directionValue,
+        timestamp: Date.now(),
+        address: address || undefined,
+        txHash,
+      };
+      return [newSubmission, ...prev].slice(0, 6);
+    });
   };
 
   const handlePlaceBet = async (directionValue: 'up' | 'down') => {
@@ -1124,6 +1151,9 @@ export default function BtcUpDownPage() {
       const value = stakeAmount ?? ethers.parseEther(STAKE_ETH);
       setBetLoadingText('Submitting bet...');
       const tx = await contract.placeBet(targetRound, encryptedData, proof, { value });
+      if (tx?.hash) {
+        handleLocalSubmit(directionValue, targetRound, tx.hash);
+      }
       const receipt = await tx.wait();
       if (receipt) {
         const receiptEvents = parseReceiptLogs(receipt, contract.interface, addressForChain);
@@ -1136,7 +1166,6 @@ export default function BtcUpDownPage() {
           );
         }
       }
-      handleLocalSubmit(directionValue, targetRound, tx.hash);
       setHasActiveBet(true);
     } catch (err: any) {
       setActionError(err?.message || 'Bet failed');
