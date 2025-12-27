@@ -1860,6 +1860,8 @@ export default function BtcUpDownPage() {
                         claimBadgeClass = 'bg-primary text-neo-black';
                       } else if (!meta.resultSet) {
                         claimLabel = 'Result pending';
+                      } else if (!directionKnown) {
+                        claimLabel = 'Decrypt to see';
                       } else if (meta.result === 3) {
                         claimLabel = meta.claimRequested ? 'Finalize' : 'Claim';
                         claimEnabled = canClaimBase;
