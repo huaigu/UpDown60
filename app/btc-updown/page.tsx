@@ -75,7 +75,7 @@ const formatAddress = (value: string) => {
 
 const formatShortAddress = (value: string) => {
   if (!value) return '';
-  return `${value.slice(0, 4)}...${value.slice(-3)}`;
+  return `${value.slice(0, 4)}...${value.slice(-4)}`;
 };
 
 const normalizeAddress = (value?: string | null) => (value ? value.toLowerCase() : '');
@@ -1244,6 +1244,7 @@ export default function BtcUpDownPage() {
       : isConnecting
         ? 'Connecting...'
         : 'Connect';
+  const connectSubLabel = isConnected && address ? formatShortAddress(address) : '';
 
   const statusHint =
     walletError ||
@@ -1457,7 +1458,14 @@ export default function BtcUpDownPage() {
             type="button"
           >
             <span className="material-symbols-outlined text-[24px]">wallet</span>
-            <span>{connectLabel}</span>
+            <span className="flex flex-col leading-none items-start">
+              <span>{connectLabel}</span>
+              {connectSubLabel ? (
+                <span className="mt-1 text-[10px] font-mono text-white/80">
+                  {connectSubLabel}
+                </span>
+              ) : null}
+            </span>
           </button>
         </div>
       </header>
