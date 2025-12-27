@@ -20,7 +20,7 @@ Note: the UI shows a CEX BTC price from Binance for display. The on-chain result
 - Chainlink Automation support for automatic round finalization
 
 ## Latest Deployment (Sepolia) 🧾
-- Contract: `0x9AD2CcA4749402C20b2f83D3e8850C2B127b61Dd`
+- Contract: `0x5F893Cf33715DbaC196229560418C709F0FFA6Ca`
 - Chainlink BTC/USD Feed: `0x1b44F3514812d835EB1BDB0acB33d3fA3351Ee43`
 - Public RPC: `https://ethereum-sepolia-rpc.publicnode.com`
 

@@ -5,6 +5,7 @@ import { ethers } from 'ethers';
 import {
   createEncryptedInput,
   decryptMultipleHandles,
+  decryptValue,
   fetchPublicDecryption,
   initializeFheInstance,
 } from '../../src/lib/fhevmInstance';
@@ -12,7 +13,7 @@ import { useFhevm } from '../providers/FhevmProvider';
 
 const CONTRACT_ADDRESSES: Record<number, string> = {
   31337: '0x0000000000000000000000000000000000000000',
-  11155111: '0x9AD2CcA4749402C20b2f83D3e8850C2B127b61Dd',
+  11155111: '0x5F893Cf33715DbaC196229560418C709F0FFA6Ca',
 };
 
 const CONTRACT_ABI = [
@@ -27,6 +28,7 @@ const CONTRACT_ABI = [
   'function getRoundTotals(uint256 roundId) view returns (uint64,uint64,uint64)',
   'function getRoundHandles(uint256 roundId) view returns (bytes32,bytes32)',
   'function getBet(uint256 roundId, address user) view returns (bool,uint64,bool,bool)',
+  'function getBetDirectionHandle(uint256 roundId, address user) view returns (bytes32)',
   'function getPendingClaim(uint256 roundId, address user) view returns (bool,bytes32)',
   'function getUserStats(address user) view returns (uint64,uint64,uint256,uint256)',
   'function placeBet(uint256 roundId, bytes32 encryptedDirection, bytes proof) payable',
@@ -64,7 +66,7 @@ const LOCAL_FEED_BLOCK_KEY = 'btcUpDownLiveFeedLastBlock';
 const LOCAL_DEPLOY_BLOCK_KEY = 'btcUpDownDeployBlock';
 const LOCAL_LAST_ADDRESS_KEY = 'btcUpDownLastAddress';
 const SEPOLIA_TX_URL = 'https://sepolia.etherscan.io/tx/';
-const SEPOLIA_DEPLOY_BLOCK = 9915377;
+const SEPOLIA_DEPLOY_BLOCK = 9922892;
 
 const formatAddress = (value: string) => {
   if (!value) return '';
@@ -195,6 +197,9 @@ export default function BtcUpDownPage() {
   const [claimStatusByRound, setClaimStatusByRound] = useState<Record<number, string>>({});
   const [claimErrorByRound, setClaimErrorByRound] = useState<Record<number, string>>({});
   const [claimMetaByRound, setClaimMetaByRound] = useState<Record<number, ClaimRoundMeta>>({});
+  const [directionDecryptingRoundId, setDirectionDecryptingRoundId] = useState<number | null>(null);
+  const [directionDecryptStatusByRound, setDirectionDecryptStatusByRound] = useState<Record<number, string>>({});
+  const [directionDecryptErrorByRound, setDirectionDecryptErrorByRound] = useState<Record<number, string>>({});
   const [deploymentBlock, setDeploymentBlock] = useState<number | null>(SEPOLIA_DEPLOY_BLOCK);
   const [feedSyncStatus, setFeedSyncStatus] = useState('');
   const [feedSyncProgress, setFeedSyncProgress] = useState<number | null>(null);
@@ -268,6 +273,9 @@ export default function BtcUpDownPage() {
     setClaimStatusByRound({});
     setClaimErrorByRound({});
     setClaimingRoundId(null);
+    setDirectionDecryptStatusByRound({});
+    setDirectionDecryptErrorByRound({});
+    setDirectionDecryptingRoundId(null);
   }, [address]);
 
   useEffect(() => {
@@ -1061,6 +1069,63 @@ export default function BtcUpDownPage() {
     }
   };
 
+  const handleDecryptDirection = async (roundId: number) => {
+    setDirectionDecryptErrorByRound((prev) => ({ ...prev, [roundId]: '' }));
+    if (directionDecryptingRoundId !== null) return;
+    setDirectionDecryptingRoundId(roundId);
+    setDirectionDecryptStatusByRound((prev) => ({ ...prev, [roundId]: 'Preparing...' }));
+    try {
+      if (!window.ethereum) {
+        throw new Error('No wallet found');
+      }
+      if (!isConnected) {
+        setDirectionDecryptStatusByRound((prev) => ({ ...prev, [roundId]: 'Connecting wallet...' }));
+        await handleConnect();
+      }
+      const accounts = await window.ethereum.request({ method: 'eth_accounts' });
+      const userAddress = accounts?.[0];
+      if (!userAddress) {
+        throw new Error('Wallet not connected');
+      }
+      const chainIdHex = await window.ethereum.request({ method: 'eth_chainId' });
+      const connectedChainId = parseInt(chainIdHex, 16);
+      if (connectedChainId !== SEPOLIA_CHAIN_ID) {
+        throw new Error('Switch to Sepolia to decrypt');
+      }
+      const addressForChain = CONTRACT_ADDRESSES[connectedChainId] || '';
+      if (!addressForChain || addressForChain === ethers.ZeroAddress) {
+        throw new Error('Contract address missing');
+      }
+      if (!isInitialized) {
+        setDirectionDecryptStatusByRound((prev) => ({ ...prev, [roundId]: 'Initializing FHEVM...' }));
+        await initialize();
+      }
+      const readContract = getReadContract();
+      const handle = await readContract.getBetDirectionHandle(roundId, userAddress);
+      if (!handle || handle === ethers.ZeroHash) {
+        throw new Error('Direction handle missing');
+      }
+      setDirectionDecryptStatusByRound((prev) => ({ ...prev, [roundId]: 'Decrypting...' }));
+      const signer = await getProvider().getSigner();
+      const value = await decryptValue(handle, addressForChain, signer);
+      const directionValue = value === 1 ? 'up' : 'down';
+      setLocalSubmissions((prev) =>
+        prev.map((item) =>
+          item.roundId === roundId ? { ...item, direction: directionValue } : item
+        )
+      );
+      setDirectionDecryptStatusByRound((prev) => ({ ...prev, [roundId]: 'Decrypted' }));
+    } catch (err: any) {
+      setDirectionDecryptErrorByRound((prev) => ({
+        ...prev,
+        [roundId]: err?.message || 'Decrypt failed',
+      }));
+      setDirectionDecryptStatusByRound((prev) => ({ ...prev, [roundId]: '' }));
+    } finally {
+      setDirectionDecryptingRoundId(null);
+    }
+  };
+
   const handleClaimForRound = async (roundId: number) => {
     setClaimErrorByRound((prev) => ({ ...prev, [roundId]: '' }));
     if (claimingRoundId !== null) return;
@@ -1626,6 +1691,8 @@ export default function BtcUpDownPage() {
                       const canClaimBase = isSameWallet && isOnSepolia && hasContract;
                       const claimInFlight = claimingRoundId === submission.roundId;
                       const directionKnown = submission.direction === 'up' || submission.direction === 'down';
+                      const canDecryptDirection = !directionKnown && isSameWallet && isOnSepolia && hasContract;
+                      const decryptInFlight = directionDecryptingRoundId === submission.roundId;
 
                       let claimLabel = 'Pending';
                       let claimEnabled = false;
@@ -1650,18 +1717,19 @@ export default function BtcUpDownPage() {
                         claimLabel = meta.claimRequested ? 'Finalize' : 'Claim';
                         claimEnabled = canClaimBase;
                         claimBadgeClass = 'bg-secondary text-white';
-                      } else if (!meta.totalsRevealed) {
-                        claimLabel = 'Reveal pending';
-                      } else if (!directionKnown) {
-                        claimLabel = meta.claimRequested ? 'Finalize' : 'Claim';
-                        claimEnabled = canClaimBase;
-                        claimBadgeClass = 'bg-secondary text-white';
                       } else {
                         const isWinner =
-                          (meta.result === 1 && submission.direction === 'up') ||
-                          (meta.result === 2 && submission.direction === 'down');
-                        if (!isWinner) {
+                          directionKnown &&
+                          ((meta.result === 1 && submission.direction === 'up') ||
+                            (meta.result === 2 && submission.direction === 'down'));
+                        if (directionKnown && !isWinner) {
                           claimLabel = 'Lost';
+                        } else if (!meta.totalsRevealed) {
+                          claimLabel = isWinner ? 'Win pending' : 'Reveal pending';
+                        } else if (!directionKnown) {
+                          claimLabel = meta.claimRequested ? 'Finalize' : 'Claim';
+                          claimEnabled = canClaimBase;
+                          claimBadgeClass = 'bg-secondary text-white';
                         } else {
                           claimLabel = meta.claimRequested ? 'Finalize' : 'Claim';
                           claimEnabled = canClaimBase;
@@ -1671,6 +1739,8 @@ export default function BtcUpDownPage() {
 
                       const claimStatus = claimStatusByRound[submission.roundId];
                       const claimError = claimErrorByRound[submission.roundId];
+                      const decryptStatus = directionDecryptStatusByRound[submission.roundId];
+                      const decryptError = directionDecryptErrorByRound[submission.roundId];
                       const txHash = submission.txHash;
 
                       return (
@@ -1708,6 +1778,20 @@ export default function BtcUpDownPage() {
                                   ? 'HIDDEN'
                                   : submission.direction.toUpperCase()}
                               </span>
+                              {canDecryptDirection ? (
+                                <button
+                                  className={`px-2 py-1 text-[10px] font-display uppercase border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] transition-all ${
+                                    decryptInFlight
+                                      ? 'bg-gray-200 text-neo-black cursor-not-allowed'
+                                      : 'bg-white text-neo-black hover:translate-x-[1px] hover:translate-y-[1px] hover:shadow-none'
+                                  }`}
+                                  disabled={decryptInFlight}
+                                  onClick={() => handleDecryptDirection(submission.roundId)}
+                                  type="button"
+                                >
+                                  {decryptInFlight ? 'Decrypting...' : 'Decrypt'}
+                                </button>
+                              ) : null}
                               {claimEnabled ? (
                                 <button
                                   className={`px-2 py-1 text-xs font-display uppercase border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] transition-all ${
@@ -1734,6 +1818,11 @@ export default function BtcUpDownPage() {
                                 {claimStatus}
                               </span>
                             ) : null}
+                            {decryptStatus ? (
+                              <span className="text-[10px] text-neo-black/60 uppercase">
+                                {decryptStatus}
+                              </span>
+                            ) : null}
                             {txHash ? (
                               <a
                                 className="text-[10px] text-neo-black/60 uppercase hover:text-neo-black font-mono"
@@ -1747,6 +1836,11 @@ export default function BtcUpDownPage() {
                             {claimError ? (
                               <span className="text-[10px] text-[#ff3333] uppercase">
                                 {claimError}
+                              </span>
+                            ) : null}
+                            {decryptError ? (
+                              <span className="text-[10px] text-[#ff3333] uppercase">
+                                {decryptError}
                               </span>
                             ) : null}
                           </div>

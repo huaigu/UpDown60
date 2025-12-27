@@ -27,9 +27,13 @@ async function main() {
     maxPriceAge
   );
   await contract.waitForDeployment();
+  const deployTx = contract.deploymentTransaction();
+  const receipt = await deployTx.wait();
   const address = await contract.getAddress();
 
   console.log('BtcUpDownFHE deployed to:', address);
+  console.log('Deploy tx:', deployTx.hash);
+  console.log('Deploy block:', receipt?.blockNumber ?? 'unknown');
   console.log('Constructor args:', {
     stakeWei: stakeWei.toString(),
     feeBps,

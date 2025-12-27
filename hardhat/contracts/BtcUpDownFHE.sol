@@ -243,10 +243,17 @@ contract BtcUpDownFHE is ZamaEthereumConfig, AutomationCompatibleInterface {
         b.stake = uint64(msg.value);
         b.direction = dir;
         FHE.allowThis(b.direction);
+        FHE.allow(b.direction, msg.sender);
         _trackParticipant(msg.sender);
         _recordBet(msg.sender, uint64(msg.value));
 
         emit BetPlaced(roundId, msg.sender, uint64(msg.value));
+    }
+
+    function getBetDirectionHandle(uint256 roundId, address user) external view returns (bytes32) {
+        Bet storage b = bets[roundId][user];
+        require(b.exists, "No bet");
+        return FHE.toBytes32(b.direction);
     }
 
     function checkUpkeep(bytes calldata) external view returns (bool upkeepNeeded, bytes memory performData) {
