@@ -1690,15 +1690,15 @@ export default function BtcUpDownPage() {
             </a>
             <a
               className="bg-white px-6 py-3 text-lg font-display uppercase border-3 border-neo-black shadow-neo-sm hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-none transition-all"
-              href="#"
+              href="/leaderboard"
             >
               Leaderboard
             </a>
             <a
               className="bg-white px-6 py-3 text-lg font-display uppercase border-3 border-neo-black shadow-neo-sm hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-none transition-all"
-              href="#"
+              href="/guide"
             >
-              Docs
+              Guide
             </a>
           </nav>
           <button
