@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ethers } from 'ethers';
 import {
   createEncryptedInput,
@@ -61,6 +61,7 @@ const SEPOLIA_CONFIG = {
 };
 const STAKE_ETH = '0.01';
 const LOCAL_SUBMISSIONS_KEY = 'btcUpDownLocalSubmissions';
+const LOCAL_CLAIM_META_KEY = 'btcUpDownClaimMeta';
 const LOCAL_FEED_KEY = 'btcUpDownLiveFeed';
 const LOCAL_FEED_BLOCK_KEY = 'btcUpDownLiveFeedLastBlock';
 const LOCAL_DEPLOY_BLOCK_KEY = 'btcUpDownDeployBlock';
@@ -246,6 +247,44 @@ export default function BtcUpDownPage() {
     const owner = (address || cachedAddress || 'anon').toLowerCase();
     return `${LOCAL_SUBMISSIONS_KEY}:${readChainId}:${readContractAddress.toLowerCase()}:${owner}`;
   }, [address, cachedAddress, readChainId, readContractAddress]);
+  const claimMetaStorageKey = useMemo(() => {
+    if (!readContractAddress || readContractAddress === ethers.ZeroAddress) return '';
+    const owner = (address || cachedAddress || '').toLowerCase();
+    if (!owner) return '';
+    return `${LOCAL_CLAIM_META_KEY}:${readChainId}:${readContractAddress.toLowerCase()}:${owner}`;
+  }, [address, cachedAddress, readChainId, readContractAddress]);
+
+  const persistClaimMeta = useCallback(
+    (next: Record<number, ClaimRoundMeta>) => {
+      if (typeof window === 'undefined' || !claimMetaStorageKey) return;
+      try {
+        window.localStorage.setItem(claimMetaStorageKey, JSON.stringify(next));
+      } catch (err) {
+        console.warn('Failed to persist claim metadata', err);
+      }
+    },
+    [claimMetaStorageKey]
+  );
+
+  const updateClaimMeta = useCallback(
+    (roundId: number, patch: Partial<ClaimRoundMeta>) => {
+      setClaimMetaByRound((prev) => {
+        const base: ClaimRoundMeta = prev[roundId] || {
+          resultSet: false,
+          totalsRevealed: false,
+          result: 0,
+          betExists: true,
+          claimRequested: false,
+          claimed: false,
+        };
+        const next = { ...prev, [roundId]: { ...base, ...patch } };
+        persistClaimMeta(next);
+        return next;
+      });
+    },
+    [persistClaimMeta]
+  );
+
   const feedBlockKey = feedStorageKey ? `${feedStorageKey}:${LOCAL_FEED_BLOCK_KEY}` : '';
   const totalsRevealed = roundTotals?.totalsRevealed ?? false;
   const isPendingReveal = !roundTotals || !roundTotals.totalsRevealed || !roundTotals.resultSet;
@@ -345,6 +384,20 @@ export default function BtcUpDownPage() {
     setLocalSubmissions(nextSubmissions);
     setSubmissionsLoadedKey(localSubmissionsKey);
   }, [localSubmissionsKey, address]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !claimMetaStorageKey) return;
+    const stored = window.localStorage.getItem(claimMetaStorageKey);
+    if (!stored) return;
+    try {
+      const parsed = JSON.parse(stored) as Record<number, ClaimRoundMeta>;
+      if (parsed && typeof parsed === 'object') {
+        setClaimMetaByRound(parsed);
+      }
+    } catch (err) {
+      console.warn('Failed to parse claim metadata cache', err);
+    }
+  }, [claimMetaStorageKey]);
 
   useEffect(() => {
     if (
@@ -504,7 +557,8 @@ export default function BtcUpDownPage() {
       return;
     }
     let isActive = true;
-    const addressLower = address?.toLowerCase() || '';
+    const resolvedAddress = address || cachedAddress;
+    const addressLower = resolvedAddress?.toLowerCase() || '';
     const roundsForUser = addressLower
       ? rounds.filter((roundId) =>
           localSubmissions.some(
@@ -519,11 +573,11 @@ export default function BtcUpDownPage() {
       try {
         const contract = getReadContract();
         const entries = await Promise.all(
-          rounds.map(async (roundId) => {
+          rounds.map(async (roundId): Promise<[number, ClaimRoundMeta]> => {
             const state = await contract.getRoundState(roundId);
             let betInfo = null;
-            if (roundsForUser.includes(roundId) && addressLower) {
-              betInfo = await contract.getBet(roundId, address);
+            if (roundsForUser.includes(roundId) && addressLower && resolvedAddress) {
+              betInfo = await contract.getBet(roundId, resolvedAddress);
             }
             return [
               roundId,
@@ -544,6 +598,7 @@ export default function BtcUpDownPage() {
           entries.forEach(([roundId, meta]) => {
             next[roundId] = meta;
           });
+          persistClaimMeta(next);
           return next;
         });
       } catch (err) {
@@ -558,7 +613,7 @@ export default function BtcUpDownPage() {
       isActive = false;
       window.clearInterval(interval);
     };
-  }, [hasReadContract, localSubmissions, address, readProvider, readContractAddress]);
+  }, [hasReadContract, localSubmissions, address, cachedAddress, readProvider, readContractAddress, persistClaimMeta]);
 
   useEffect(() => {
     let isActive = true;
@@ -698,6 +753,12 @@ export default function BtcUpDownPage() {
       .slice(0, 20);
   };
 
+  const getEventLogIndex = (event: { logIndex?: number; index?: number }) =>
+    event.logIndex ?? event.index ?? 0;
+
+  const getEventArgs = (event: any) =>
+    (event?.args as Record<string, unknown> | undefined) ?? undefined;
+
   const parseReceiptLogs = (
     receipt: ethers.TransactionReceipt,
     iface: ethers.Interface,
@@ -708,6 +769,7 @@ export default function BtcUpDownPage() {
       if (log.address.toLowerCase() !== contractAddr.toLowerCase()) return;
       try {
         const parsed = iface.parseLog({ topics: log.topics, data: log.data });
+        if (!parsed) return;
         const base = {
           id: `${log.transactionHash}-${log.index ?? 0}`,
           txHash: log.transactionHash,
@@ -720,7 +782,7 @@ export default function BtcUpDownPage() {
             type: 'bet',
             user: parsed.args?.user as string,
             roundId: Number(parsed.args?.roundId ?? 0),
-            amountEth: ethers.formatEther(parsed.args?.stake ?? 0n),
+            amountEth: ethers.formatEther(parsed.args?.stake ?? BigInt(0)),
           });
         } else if (parsed.name === 'ClaimPaid') {
           mapped.push({
@@ -728,7 +790,7 @@ export default function BtcUpDownPage() {
             type: 'claim',
             user: parsed.args?.user as string,
             roundId: Number(parsed.args?.roundId ?? 0),
-            amountEth: ethers.formatEther(parsed.args?.payout ?? 0n),
+            amountEth: ethers.formatEther(parsed.args?.payout ?? BigInt(0)),
           });
         } else if (parsed.name === 'RoundInitialized') {
           mapped.push({
@@ -821,12 +883,6 @@ export default function BtcUpDownPage() {
     if (!hasReadContract || !feedStorageKey) return;
     let isActive = true;
     const contract = new ethers.Contract(readContractAddress, CONTRACT_ABI, logProvider);
-    const eventTopics = [
-      contract.interface.getEvent('BetPlaced').topicHash,
-      contract.interface.getEvent('ClaimPaid').topicHash,
-      contract.interface.getEvent('RoundInitialized').topicHash,
-      contract.interface.getEvent('RoundFinalized').topicHash,
-    ];
 
     const resolveDeploymentBlock = async (latestBlock: number) => {
       if (deploymentBlock !== null) return deploymentBlock;
@@ -868,47 +924,65 @@ export default function BtcUpDownPage() {
         ]);
         if (!isActive) return;
         const mapped = [
-          ...betEvents.map((event) => ({
-            id: `${event.transactionHash}-${event.logIndex ?? event.index ?? 0}`,
-            type: 'bet' as const,
-            user: event.args?.user as string,
-            roundId: Number(event.args?.roundId ?? 0),
-            amountEth: ethers.formatEther(event.args?.stake ?? 0n),
-            txHash: event.transactionHash,
-            blockNumber: event.blockNumber ?? 0,
-            logIndex: event.logIndex ?? event.index ?? 0,
-          })),
-          ...claimEvents.map((event) => ({
-            id: `${event.transactionHash}-${event.logIndex ?? event.index ?? 0}`,
-            type: 'claim' as const,
-            user: event.args?.user as string,
-            roundId: Number(event.args?.roundId ?? 0),
-            amountEth: ethers.formatEther(event.args?.payout ?? 0n),
-            txHash: event.transactionHash,
-            blockNumber: event.blockNumber ?? 0,
-            logIndex: event.logIndex ?? event.index ?? 0,
-          })),
-          ...initEvents.map((event) => ({
-            id: `${event.transactionHash}-${event.logIndex ?? event.index ?? 0}`,
-            type: 'round-init' as const,
-            roundId: Number(event.args?.roundId ?? 0),
-            startTime: Number(event.args?.startTime ?? 0),
-            endTime: Number(event.args?.endTime ?? 0),
-            txHash: event.transactionHash,
-            blockNumber: event.blockNumber ?? 0,
-            logIndex: event.logIndex ?? event.index ?? 0,
-          })),
-          ...finalizeEvents.map((event) => ({
-            id: `${event.transactionHash}-${event.logIndex ?? event.index ?? 0}`,
-            type: 'round-final' as const,
-            roundId: Number(event.args?.roundId ?? 0),
-            startPrice: event.args?.startPrice?.toString?.(),
-            endPrice: event.args?.endPrice?.toString?.(),
-            result: Number(event.args?.result ?? 0),
-            txHash: event.transactionHash,
-            blockNumber: event.blockNumber ?? 0,
-            logIndex: event.logIndex ?? event.index ?? 0,
-          })),
+          ...betEvents.map((event) => {
+            const args = getEventArgs(event);
+            return {
+              id: `${event.transactionHash}-${getEventLogIndex(event)}`,
+              type: 'bet' as const,
+              user: args?.user as string,
+              roundId: Number((args?.roundId as bigint | number | string) ?? 0),
+              amountEth: ethers.formatEther(
+                (args?.stake as bigint | number | string) ?? BigInt(0)
+              ),
+              txHash: event.transactionHash,
+              blockNumber: event.blockNumber ?? 0,
+              logIndex: getEventLogIndex(event),
+            };
+          }),
+          ...claimEvents.map((event) => {
+            const args = getEventArgs(event);
+            return {
+              id: `${event.transactionHash}-${getEventLogIndex(event)}`,
+              type: 'claim' as const,
+              user: args?.user as string,
+              roundId: Number((args?.roundId as bigint | number | string) ?? 0),
+              amountEth: ethers.formatEther(
+                (args?.payout as bigint | number | string) ?? BigInt(0)
+              ),
+              txHash: event.transactionHash,
+              blockNumber: event.blockNumber ?? 0,
+              logIndex: getEventLogIndex(event),
+            };
+          }),
+          ...initEvents.map((event) => {
+            const args = getEventArgs(event);
+            return {
+              id: `${event.transactionHash}-${getEventLogIndex(event)}`,
+              type: 'round-init' as const,
+              roundId: Number((args?.roundId as bigint | number | string) ?? 0),
+              startTime: Number((args?.startTime as bigint | number | string) ?? 0),
+              endTime: Number((args?.endTime as bigint | number | string) ?? 0),
+              txHash: event.transactionHash,
+              blockNumber: event.blockNumber ?? 0,
+              logIndex: getEventLogIndex(event),
+            };
+          }),
+          ...finalizeEvents.map((event) => {
+            const args = getEventArgs(event);
+            return {
+              id: `${event.transactionHash}-${getEventLogIndex(event)}`,
+              type: 'round-final' as const,
+              roundId: Number((args?.roundId as bigint | number | string) ?? 0),
+              startPrice: (args?.startPrice as bigint | number | string | undefined)
+                ?.toString?.(),
+              endPrice: (args?.endPrice as bigint | number | string | undefined)
+                ?.toString?.(),
+              result: Number((args?.result as bigint | number | string) ?? 0),
+              txHash: event.transactionHash,
+              blockNumber: event.blockNumber ?? 0,
+              logIndex: getEventLogIndex(event),
+            };
+          }),
         ];
 
         if (mapped.length) {
@@ -968,7 +1042,7 @@ export default function BtcUpDownPage() {
     }
   };
 
-  const getProvider = () => new ethers.BrowserProvider(window.ethereum);
+  const getProvider = () => new ethers.BrowserProvider(window.ethereum!);
 
   const getReadContract = () => {
     return new ethers.Contract(readContractAddress, CONTRACT_ABI, readProvider);
@@ -1162,6 +1236,73 @@ export default function BtcUpDownPage() {
       }
 
       const readContract = getReadContract();
+      const roundState = await readContract.getRoundState(roundId);
+      const resultValue = Number(roundState[5]);
+      const resultSet = roundState[6];
+      const revealRequested = roundState[7];
+      const totalsRevealed = roundState[8];
+
+      if (!resultSet) {
+        throw new Error('Result not set yet');
+      }
+
+      if (resultValue !== 3 && !totalsRevealed) {
+        const writeContract = await getWriteContract(addressForChain);
+        if (!revealRequested) {
+          setClaimStatusByRound((prev) => ({ ...prev, [roundId]: 'Requesting reveal...' }));
+          const revealTx = await writeContract.requestRoundReveal(roundId);
+          await revealTx.wait();
+        }
+        setClaimStatusByRound((prev) => ({ ...prev, [roundId]: 'Decrypting totals...' }));
+        const handles = await readContract.getRoundHandles(roundId);
+        const totalUpHandle = handles[0];
+        const totalDownHandle = handles[1];
+        if (
+          !totalUpHandle ||
+          totalUpHandle === ethers.ZeroHash ||
+          !totalDownHandle ||
+          totalDownHandle === ethers.ZeroHash
+        ) {
+          throw new Error('Totals handles missing');
+        }
+        const result = await fetchPublicDecryption([totalUpHandle, totalDownHandle]);
+        let cleartexts = result?.abiEncodedClearValues;
+        if (!cleartexts) {
+          const clearValues = result?.clearValues;
+          if (!clearValues || typeof clearValues !== 'object') {
+            throw new Error('Missing clear values for totals');
+          }
+          const rawUp = clearValues[totalUpHandle] ?? Object.values(clearValues)[0];
+          const rawDown = clearValues[totalDownHandle] ?? Object.values(clearValues)[1];
+          if (rawUp === undefined || rawDown === undefined) {
+            throw new Error('Missing clear values for totals');
+          }
+          const totalUp = typeof rawUp === 'bigint' ? rawUp : BigInt(rawUp || 0);
+          const totalDown = typeof rawDown === 'bigint' ? rawDown : BigInt(rawDown || 0);
+          const abiCoder = ethers.AbiCoder.defaultAbiCoder();
+          cleartexts = abiCoder.encode(['uint64', 'uint64'], [totalUp, totalDown]);
+        }
+        const proof = result?.decryptionProof;
+        if (!proof) {
+          throw new Error('Missing decryption proof');
+        }
+
+        setClaimStatusByRound((prev) => ({ ...prev, [roundId]: 'Submitting reveal...' }));
+        const resolveTx = await writeContract.resolveTotalsCallback(roundId, cleartexts, proof);
+        await resolveTx.wait();
+        updateClaimMeta(roundId, {
+          resultSet: true,
+          totalsRevealed: true,
+          result: resultValue,
+        });
+      } else {
+        updateClaimMeta(roundId, {
+          resultSet: true,
+          totalsRevealed,
+          result: resultValue,
+        });
+      }
+
       let pending = await readContract.getPendingClaim(roundId, userAddress);
       if (!pending[0]) {
         setClaimStatusByRound((prev) => ({ ...prev, [roundId]: 'Requesting claim...' }));
@@ -1173,13 +1314,12 @@ export default function BtcUpDownPage() {
 
       if (!pending[0]) {
         setClaimStatusByRound((prev) => ({ ...prev, [roundId]: 'Claim completed' }));
-        setClaimMetaByRound((prev) => {
-          const existing = prev[roundId];
-          if (!existing) return prev;
-          return { ...prev, [roundId]: { ...existing, claimed: true } };
-        });
+        updateClaimMeta(roundId, { claimed: true });
         return;
       }
+
+      updateClaimMeta(roundId, { claimRequested: true });
+
       const pendingHandle = pending[1];
       if (!pendingHandle || pendingHandle === ethers.ZeroHash) {
         setClaimStatusByRound((prev) => ({ ...prev, [roundId]: 'Claim submitted' }));
@@ -1206,11 +1346,7 @@ export default function BtcUpDownPage() {
       const claimTx = await contract.claimCallback(roundId, cleartexts, proof);
       await claimTx.wait();
       setClaimStatusByRound((prev) => ({ ...prev, [roundId]: 'Claim completed' }));
-      setClaimMetaByRound((prev) => {
-        const existing = prev[roundId];
-        if (!existing) return prev;
-        return { ...prev, [roundId]: { ...existing, claimed: true } };
-      });
+      updateClaimMeta(roundId, { claimed: true, claimRequested: true });
     } catch (err: any) {
       setClaimErrorByRound((prev) => ({
         ...prev,
@@ -1273,7 +1409,7 @@ export default function BtcUpDownPage() {
     const losingTotal =
       roundTotals.result === 1 ? roundTotals.totalDown : roundTotals.totalUp;
     const fee = roundTotals.feeAmount;
-    const distributable = losingTotal > fee ? losingTotal - fee : 0n;
+    const distributable = losingTotal > fee ? losingTotal - fee : BigInt(0);
     const winningTotalEth = Number(ethers.formatEther(winningTotal));
     const distributableEth = Number(ethers.formatEther(distributable));
     const multiplier =
@@ -1363,15 +1499,15 @@ export default function BtcUpDownPage() {
   const netProfitText =
     netProfitValue === null
       ? '--'
-      : `${netProfitValue > 0n ? '+' : netProfitValue < 0n ? '-' : ''}${formatEthValue(
-          ethers.formatEther(netProfitValue < 0n ? -netProfitValue : netProfitValue)
+      : `${netProfitValue > BigInt(0) ? '+' : netProfitValue < BigInt(0) ? '-' : ''}${formatEthValue(
+          ethers.formatEther(netProfitValue < BigInt(0) ? -netProfitValue : netProfitValue)
         )} ETH`;
   const netProfitClass =
     netProfitValue === null
       ? 'text-neo-black'
-      : netProfitValue > 0n
+      : netProfitValue > BigInt(0)
         ? 'text-[#0bda0b]'
-        : netProfitValue < 0n
+        : netProfitValue < BigInt(0)
           ? 'text-[#ff3333]'
           : 'text-neo-black';
   const canBet = isConnected && isOnSepolia && isInitialized && hasContract;
@@ -1736,9 +1872,7 @@ export default function BtcUpDownPage() {
                         if (directionKnown && !isWinner) {
                           claimLabel = 'Lost';
                         } else if (!meta.totalsRevealed) {
-                          claimLabel = isWinner ? 'Win pending' : 'Reveal pending';
-                        } else if (!directionKnown) {
-                          claimLabel = meta.claimRequested ? 'Finalize' : 'Claim';
+                          claimLabel = 'Reveal & Claim';
                           claimEnabled = canClaimBase;
                           claimBadgeClass = 'bg-secondary text-white';
                         } else {
@@ -2038,7 +2172,7 @@ function LegacyBtcUpDownPage() {
   const [error, setError] = useState('');
   const [isInitialized, setIsInitialized] = useState(false);
 
-  const [stakeAmount, setStakeAmount] = useState<bigint>(0n);
+  const [stakeAmount, setStakeAmount] = useState<bigint>(BigInt(0));
   const [currentRound, setCurrentRound] = useState<number | null>(null);
   const [roundId, setRoundId] = useState<number | null>(null);
   const [direction, setDirection] = useState<'up' | 'down'>('up');
@@ -2072,7 +2206,7 @@ function LegacyBtcUpDownPage() {
     }
   };
 
-  const getProvider = () => new ethers.BrowserProvider(window.ethereum);
+  const getProvider = () => new ethers.BrowserProvider(window.ethereum!);
 
   const getContract = async (withSigner: boolean) => {
     const provider = getProvider();
