@@ -750,7 +750,7 @@ export default function BtcUpDownPage() {
         }
         return b.logIndex - a.logIndex;
       })
-      .slice(0, 20);
+      .slice(0, 60);
   };
 
   const getEventLogIndex = (event: { logIndex?: number; index?: number }) =>
@@ -1478,20 +1478,6 @@ export default function BtcUpDownPage() {
         ? feedSyncStatus || 'Syncing history from deployment...'
         : `Live. Synced to block #${lastIndexedBlock ?? '--'}. Round events, bets, and claims appear here.`;
   const roundResultId = currentRound && currentRound > 0 ? currentRound - 1 : null;
-  const roundResultText = useMemo(() => {
-    if (!roundResultId) return 'Round -- Pending';
-    if (!roundTotals?.resultSet) return `Round #${roundResultId} Pending`;
-    if (roundTotals.result === 1) return `Round #${roundResultId} UP`;
-    if (roundTotals.result === 2) return `Round #${roundResultId} DOWN`;
-    if (roundTotals.result === 3) return `Round #${roundResultId} TIE`;
-    return `Round #${roundResultId} Pending`;
-  }, [roundResultId, roundTotals]);
-  const roundResultClass =
-    roundTotals?.result === 1
-      ? 'text-[#0bda0b]'
-      : roundTotals?.result === 2
-        ? 'text-[#ff3333]'
-        : 'text-white';
   const getFeedUserLabel = (event: FeedEvent) => {
     if (event.type === 'bet' || event.type === 'claim') {
       const user = event.user || '';
@@ -1514,6 +1500,42 @@ export default function BtcUpDownPage() {
     if (value === 3) return 'bg-gray-300 text-neo-black';
     return 'bg-white text-neo-black';
   };
+  const recentRoundResults = useMemo(() => {
+    const sortedResults = feedEvents
+      .filter(
+        (event) =>
+          event.type === 'round-final' &&
+          (event.result === 1 || event.result === 2 || event.result === 3)
+      )
+      .sort((a, b) => {
+        if (a.roundId !== b.roundId) return b.roundId - a.roundId;
+        if (a.blockNumber !== b.blockNumber) return b.blockNumber - a.blockNumber;
+        return b.logIndex - a.logIndex;
+      });
+
+    const seen = new Set<number>();
+    const results: Array<{ roundId: number; result: number }> = [];
+    sortedResults.forEach((event) => {
+      if (seen.has(event.roundId)) return;
+      seen.add(event.roundId);
+      results.push({ roundId: event.roundId, result: event.result as number });
+    });
+
+    if (
+      roundResultId &&
+      roundTotals?.resultSet &&
+      (roundTotals.result === 1 || roundTotals.result === 2 || roundTotals.result === 3) &&
+      !seen.has(roundResultId)
+    ) {
+      results.push({ roundId: roundResultId, result: roundTotals.result });
+    }
+
+    return results.sort((a, b) => b.roundId - a.roundId).slice(0, 10);
+  }, [feedEvents, roundResultId, roundTotals]);
+  const marqueeResults =
+    recentRoundResults.length > 0
+      ? [...recentRoundResults, ...recentRoundResults]
+      : [];
   const winRateText = userStats
     ? userStats.totalBets > 0
       ? `${Math.round((userStats.totalWins / userStats.totalBets) * 100)}%`
@@ -1635,25 +1657,29 @@ export default function BtcUpDownPage() {
         </div>
       </header>
       <div className="bg-neo-black border-b-6 border-neo-black overflow-hidden whitespace-nowrap py-3 flex items-center rotate-0">
-        <div className="animate-marquee inline-block">
-          <span className={`mx-12 font-display text-2xl uppercase ${roundResultClass}`}>
-            {roundResultText}
-          </span>
-          <span className={`mx-12 font-display text-2xl uppercase ${roundResultClass}`}>
-            {roundResultText}
-          </span>
-          <span className={`mx-12 font-display text-2xl uppercase ${roundResultClass}`}>
-            {roundResultText}
-          </span>
-          <span className={`mx-12 font-display text-2xl uppercase ${roundResultClass}`}>
-            {roundResultText}
-          </span>
-          <span className={`mx-12 font-display text-2xl uppercase ${roundResultClass}`}>
-            {roundResultText}
-          </span>
-          <span className={`mx-12 font-display text-2xl uppercase ${roundResultClass}`}>
-            {roundResultText}
-          </span>
+        <div className="animate-marquee inline-flex items-center">
+          {marqueeResults.length ? (
+            marqueeResults.map((item, index) => (
+              <div className="flex items-center gap-3 mx-8" key={`${item.roundId}-${index}`}>
+                <span className="text-white/70 font-display text-sm uppercase tracking-[0.2em]">
+                  Round #{item.roundId}
+                </span>
+                <span
+                  className={`${getRoundResultClass(
+                    item.result
+                  )} px-3 py-1 border-2 border-neo-black shadow-neo-sm font-display text-lg uppercase`}
+                >
+                  {getRoundResultLabel(item.result)}
+                </span>
+              </div>
+            ))
+          ) : (
+            <div className="flex items-center gap-3 mx-8">
+              <span className="text-white/80 font-display text-lg uppercase">
+                Awaiting results
+              </span>
+            </div>
+          )}
         </div>
       </div>
       <main className="flex-grow w-full max-w-[1440px] mx-auto p-6 md:p-10 grid grid-cols-1 lg:grid-cols-12 gap-10">
@@ -2179,15 +2205,19 @@ export default function BtcUpDownPage() {
           <div className="flex gap-8">
             <a
               className="text-neo-black hover:text-secondary text-sm font-display uppercase border-b-4 border-transparent hover:border-secondary transition-all"
-              href="#"
+              href="https://x.com/coder_chao"
+              rel="noreferrer"
+              target="_blank"
             >
-              Terms of Service
+              Twitter
             </a>
             <a
               className="text-neo-black hover:text-secondary text-sm font-display uppercase border-b-4 border-transparent hover:border-secondary transition-all"
-              href="#"
+              href="https://github.com/huaigu/UpDown60"
+              rel="noreferrer"
+              target="_blank"
             >
-              Privacy Policy
+              GitHub
             </a>
           </div>
         </div>
