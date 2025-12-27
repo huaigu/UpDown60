@@ -2012,7 +2012,7 @@ export default function BtcUpDownPage() {
                                     const hasFinal =
                                       finalResult === 1 || finalResult === 2 || finalResult === 3;
                                     const isTie = finalResult === 3;
-                                    let actionLabel = 'PENDING';
+                                    let actionLabel = event.type === 'bet' ? 'BET' : 'PENDING';
                                     let actionClass = 'bg-gray-200 text-neo-black';
                                     if (hasFinal) {
                                       if (isTie) {
