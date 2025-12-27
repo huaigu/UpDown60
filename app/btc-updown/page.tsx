@@ -1274,6 +1274,7 @@ export default function BtcUpDownPage() {
         }),
       }))
       .sort((a, b) => {
+        if (a.roundId !== b.roundId) return b.roundId - a.roundId;
         if (a.lastBlock !== b.lastBlock) return b.lastBlock - a.lastBlock;
         return b.lastLogIndex - a.lastLogIndex;
       })
