@@ -673,22 +673,25 @@ export default function BtcUpDownPage() {
       merged.set(item.id, item);
     });
     const typePriority: Record<FeedEvent['type'], number> = {
-      'round-final': 0,
-      'round-init': 1,
-      bet: 2,
-      claim: 3,
+      'round-init': 0,
+      bet: 1,
+      claim: 2,
+      'round-final': 3,
     };
     return Array.from(merged.values())
       .sort((a, b) => {
-        if (b.blockNumber !== a.blockNumber) {
-          return b.blockNumber - a.blockNumber;
+        if (a.roundId !== b.roundId) {
+          return b.roundId - a.roundId;
         }
-        if (a.roundId === b.roundId && a.type !== b.type) {
+        if (a.type !== b.type) {
           const priorityA = typePriority[a.type] ?? 9;
           const priorityB = typePriority[b.type] ?? 9;
           if (priorityA !== priorityB) {
             return priorityA - priorityB;
           }
+        }
+        if (b.blockNumber !== a.blockNumber) {
+          return b.blockNumber - a.blockNumber;
         }
         return b.logIndex - a.logIndex;
       })
