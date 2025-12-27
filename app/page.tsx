@@ -417,11 +417,3 @@ function HomePage() {
 export default function Home() {
   return <BtcUpDownPage />;
 }
-
-export function LegacyHome() {
-  return (
-    <FhevmProvider>
-      <HomePage />
-    </FhevmProvider>
-  );
-}
