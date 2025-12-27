@@ -63,6 +63,7 @@ const LOCAL_FEED_KEY = 'btcUpDownLiveFeed';
 const LOCAL_FEED_BLOCK_KEY = 'btcUpDownLiveFeedLastBlock';
 const LOCAL_DEPLOY_BLOCK_KEY = 'btcUpDownDeployBlock';
 const SEPOLIA_TX_URL = 'https://sepolia.etherscan.io/tx/';
+const SEPOLIA_DEPLOY_BLOCK = 9915377;
 
 const formatAddress = (value: string) => {
   if (!value) return '';
@@ -92,8 +93,8 @@ const formatChainlinkPrice = (value?: string | bigint | number | null) => {
   if (!Number.isFinite(numeric)) return '--';
   const price = numeric / 1e8;
   return new Intl.NumberFormat('en-US', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
   }).format(price);
 };
 
@@ -186,9 +187,10 @@ export default function BtcUpDownPage() {
   const [claimStatusByRound, setClaimStatusByRound] = useState<Record<number, string>>({});
   const [claimErrorByRound, setClaimErrorByRound] = useState<Record<number, string>>({});
   const [claimMetaByRound, setClaimMetaByRound] = useState<Record<number, ClaimRoundMeta>>({});
-  const [deploymentBlock, setDeploymentBlock] = useState<number | null>(null);
+  const [deploymentBlock, setDeploymentBlock] = useState<number | null>(SEPOLIA_DEPLOY_BLOCK);
   const [feedSyncStatus, setFeedSyncStatus] = useState('');
   const [feedSyncProgress, setFeedSyncProgress] = useState<number | null>(null);
+  const [feedSyncError, setFeedSyncError] = useState('');
   const [userStats, setUserStats] = useState<{
     totalBets: number;
     totalWins: number;
@@ -198,7 +200,8 @@ export default function BtcUpDownPage() {
   const [btcPrice, setBtcPrice] = useState<string | null>(null);
   const [btcChangePct, setBtcChangePct] = useState<number | null>(null);
   const btcPriceRef = useRef<number | null>(null);
-  const deployBlockLookupRef = useRef(false);
+  const placeCardRef = useRef<HTMLDivElement | null>(null);
+  const [placeCardHeight, setPlaceCardHeight] = useState<number | null>(null);
   const [blockTimestamp, setBlockTimestamp] = useState<number | null>(null);
   const [blockFetchedAt, setBlockFetchedAt] = useState<number | null>(null);
   const [clientNow, setClientNow] = useState(0);
@@ -314,19 +317,30 @@ export default function BtcUpDownPage() {
   }, [feedStorageKey, feedBlockKey]);
 
   useEffect(() => {
-    if (typeof window === 'undefined' || !deployBlockKey) return;
-    setDeploymentBlock(null);
-    const stored = window.localStorage.getItem(deployBlockKey);
-    if (stored) {
-      const parsed = Number(stored);
-      setDeploymentBlock(Number.isNaN(parsed) ? null : parsed);
-    }
-  }, [deployBlockKey]);
+    if (!placeCardRef.current) return;
+    const element = placeCardRef.current;
+    const updateHeight = () => {
+      setPlaceCardHeight(element.getBoundingClientRect().height);
+    };
+    updateHeight();
+    const observer = new ResizeObserver(() => updateHeight());
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
-    if (typeof window === 'undefined' || !deployBlockKey || deploymentBlock === null) return;
-    window.localStorage.setItem(deployBlockKey, String(deploymentBlock));
-  }, [deployBlockKey, deploymentBlock]);
+    if (typeof window === 'undefined' || !deployBlockKey) return;
+    const storedDeploy = window.localStorage.getItem(deployBlockKey);
+    if (!storedDeploy && lastIndexedBlock !== null) {
+      if (feedBlockKey) {
+        window.localStorage.removeItem(feedBlockKey);
+      }
+      setLastIndexedBlock(null);
+      setFeedEvents([]);
+    }
+    window.localStorage.setItem(deployBlockKey, String(SEPOLIA_DEPLOY_BLOCK));
+    setDeploymentBlock(SEPOLIA_DEPLOY_BLOCK);
+  }, [deployBlockKey, feedBlockKey, lastIndexedBlock]);
 
   useEffect(() => {
     if (typeof window === 'undefined' || !feedStorageKey) return;
@@ -597,56 +611,38 @@ export default function BtcUpDownPage() {
     if (!hasReadContract || !feedStorageKey) return;
     let isActive = true;
     const contract = new ethers.Contract(readContractAddress, CONTRACT_ABI, readProvider);
+    const eventTopics = [
+      contract.interface.getEvent('BetPlaced').topicHash,
+      contract.interface.getEvent('ClaimPaid').topicHash,
+      contract.interface.getEvent('RoundInitialized').topicHash,
+      contract.interface.getEvent('RoundFinalized').topicHash,
+    ];
 
     const resolveDeploymentBlock = async (latestBlock: number) => {
       if (deploymentBlock !== null) return deploymentBlock;
-      if (deployBlockLookupRef.current) return null;
-      deployBlockLookupRef.current = true;
-      try {
-        const codeLatest = await publicProvider.getCode(readContractAddress, latestBlock);
-        if (!codeLatest || codeLatest === '0x') {
-          console.warn('No contract code found for address');
-          return null;
-        }
-        let low = 0;
-        let high = latestBlock;
-        while (low + 1 < high) {
-          const mid = Math.floor((low + high) / 2);
-          const code = await publicProvider.getCode(readContractAddress, mid);
-          if (!code || code === '0x') {
-            low = mid;
-          } else {
-            high = mid;
-          }
-        }
-        setDeploymentBlock(high);
-        return high;
-      } catch (err) {
-        console.warn('Failed to resolve deployment block', err);
-        return null;
-      } finally {
-        deployBlockLookupRef.current = false;
-      }
+      return SEPOLIA_DEPLOY_BLOCK <= latestBlock ? SEPOLIA_DEPLOY_BLOCK : null;
     };
 
     const syncFeed = async () => {
       try {
-        setFeedSyncStatus('Syncing live feed...');
-        setFeedSyncProgress(null);
+        if (lastIndexedBlock === null) {
+          setFeedSyncStatus('Syncing history from deployment...');
+          setFeedSyncProgress(null);
+          setFeedSyncError('');
+        }
         const latestBlock = await readProvider.getBlockNumber();
         let fromBlock: number | null = null;
         if (lastIndexedBlock !== null) {
           fromBlock = Math.max(lastIndexedBlock - 50, 0);
         } else {
-          setFeedSyncStatus('Syncing history from deployment...');
           const deployBlock = await resolveDeploymentBlock(latestBlock);
           if (deployBlock === null) {
-            setFeedSyncStatus('Feed sync paused (deployment block unavailable).');
+            setFeedSyncError('Feed sync paused (deployment block unavailable).');
             return;
           }
           fromBlock = deployBlock;
         }
-        if (fromBlock !== null && latestBlock > fromBlock) {
+        if (lastIndexedBlock === null && fromBlock !== null && latestBlock > fromBlock) {
           const progress = Math.min(
             100,
             Math.round(((latestBlock - fromBlock) / Math.max(latestBlock, 1)) * 100)
@@ -722,11 +718,16 @@ export default function BtcUpDownPage() {
           });
         }
         setLastIndexedBlock(latestBlock);
-        setFeedSyncStatus('');
-        setFeedSyncProgress(null);
+        if (lastIndexedBlock === null) {
+          setFeedSyncStatus('');
+          setFeedSyncProgress(null);
+        }
+        setFeedSyncError('');
       } catch (err) {
         console.warn('Failed to sync live feed', err);
-        setFeedSyncStatus('Live feed sync failed. Retrying...');
+        if (lastIndexedBlock === null) {
+          setFeedSyncError('Live feed sync failed. Retrying...');
+        }
       }
     };
 
@@ -1036,13 +1037,14 @@ export default function BtcUpDownPage() {
   const displaySubmissions = localSubmissions.slice(0, 3);
   const displayRoundId = currentRound ?? 9284;
   const displayFeedEvents = feedEvents.slice(0, 10);
+  const isInitialSync = lastIndexedBlock === null;
   const feedHint = !hasReadContract
     ? 'Contract address missing.'
-    : feedSyncStatus
-      ? feedSyncStatus
-    : !isConnected
-      ? 'Public RPC active. Round events, bets, and claims appear here.'
-      : 'Round events, bets, and claims appear here.';
+    : feedSyncError
+      ? feedSyncError
+        : isInitialSync
+        ? feedSyncStatus || 'Syncing history from deployment...'
+        : `Live. Synced to block #${lastIndexedBlock ?? '--'}. Round events, bets, and claims appear here.`;
   const roundResultId = currentRound && currentRound > 0 ? currentRound - 1 : null;
   const roundResultText = useMemo(() => {
     if (!roundResultId) return 'Round -- Pending';
@@ -1311,7 +1313,10 @@ export default function BtcUpDownPage() {
               </div>
             </div>
           </div>
-          <div className="border-6 border-neo-black bg-white p-8 relative shadow-neo rounded-2xl">
+          <div
+            className="border-6 border-neo-black bg-white p-8 relative shadow-neo rounded-2xl"
+            ref={placeCardRef}
+          >
             <div className="absolute -top-5 left-8 bg-neo-black text-white px-4 py-2 border-3 border-white transform -rotate-1 shadow-md z-10">
               <h3 className="text-2xl font-display uppercase flex items-center gap-2">
                 Place Your Position
@@ -1553,7 +1558,10 @@ export default function BtcUpDownPage() {
               </div>
             </div>
           </div>
-          <div className="border-5 border-neo-black bg-white flex-grow flex flex-col min-h-[400px] shadow-neo rounded-2xl overflow-hidden">
+          <div
+            className="border-5 border-neo-black bg-white flex-grow flex flex-col min-h-[400px] shadow-neo rounded-2xl overflow-hidden"
+            style={placeCardHeight ? { height: `${placeCardHeight}px` } : undefined}
+          >
             <div className="bg-secondary p-4 border-b-5 border-neo-black flex justify-between items-center">
               <h3 className="text-white font-display uppercase text-2xl tracking-wide">Live Feed</h3>
               <div className="flex gap-2">
@@ -1565,11 +1573,15 @@ export default function BtcUpDownPage() {
                 <span>
                   Round events and user activity stream here. Directions stay encrypted until reveal.
                 </span>
-                {feedSyncProgress !== null ? (
+                {isInitialSync ? (
                   <span className="text-[10px] text-neo-black/50">
-                    Sync progress: {feedSyncProgress}%
+                    Sync progress: {feedSyncProgress ?? 0}% | Synced block: {lastIndexedBlock ?? '--'}
                   </span>
-                ) : null}
+                ) : (
+                  <span className="text-[10px] text-neo-black/50">
+                    Synced block: {lastIndexedBlock ?? '--'}
+                  </span>
+                )}
               </div>
               <table className="w-full text-left border-collapse table-fixed">
                 <thead className="sticky top-0 bg-gray-100 z-10 border-b-4 border-neo-black shadow-sm">
@@ -1609,11 +1621,11 @@ export default function BtcUpDownPage() {
                           {getFeedUserLabel(event)}
                         </td>
                         <td className="p-3 text-center">
-                          <span
-                            className={`${actionClass} text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase whitespace-nowrap`}
-                          >
-                            {actionLabel}
-                          </span>
+                            <span
+                              className={`${actionClass} text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase whitespace-nowrap min-w-[84px] inline-flex justify-center`}
+                            >
+                              {actionLabel}
+                            </span>
                         </td>
                           <td className="p-4 text-right font-display">
                             {isRoundEvent ? (
