@@ -664,10 +664,23 @@ export default function BtcUpDownPage() {
     [...prev, ...incoming].forEach((item) => {
       merged.set(item.id, item);
     });
+    const typePriority: Record<FeedEvent['type'], number> = {
+      'round-final': 0,
+      'round-init': 1,
+      bet: 2,
+      claim: 3,
+    };
     return Array.from(merged.values())
       .sort((a, b) => {
         if (b.blockNumber !== a.blockNumber) {
           return b.blockNumber - a.blockNumber;
+        }
+        if (a.roundId === b.roundId && a.type !== b.type) {
+          const priorityA = typePriority[a.type] ?? 9;
+          const priorityB = typePriority[b.type] ?? 9;
+          if (priorityA !== priorityB) {
+            return priorityA - priorityB;
+          }
         }
         return b.logIndex - a.logIndex;
       })
@@ -1406,13 +1419,27 @@ export default function BtcUpDownPage() {
         <div className="lg:col-span-8 flex flex-col gap-10">
           <div className="border-6 border-neo-black bg-white p-8 shadow-neo relative rounded-2xl">
             <div className="absolute -top-6 -right-4 bg-secondary text-white font-display px-6 py-2 border-3 border-neo-black uppercase text-lg transform rotate-6 shadow-neo-sm z-10">
-              Betting on #{displayTargetRoundId}
+              Round #{displayRoundId} Live
             </div>
             <div className="flex flex-col md:flex-row justify-between items-end gap-8">
               <div>
                 <h2 className="bg-neo-black text-white inline-block px-2 py-1 text-sm font-display uppercase tracking-widest mb-4">
                   Next Round Closes In
                 </h2>
+                <div className="flex items-center gap-2 mb-3">
+                  <span className="bg-secondary text-white text-[10px] font-display uppercase px-2 py-1 border-2 border-neo-black shadow-neo-sm">
+                    Betting on #{displayTargetRoundId}
+                  </span>
+                  <span className="text-[10px] uppercase text-neo-black/60">
+                    Next round only
+                  </span>
+                  <span
+                    className="material-symbols-outlined text-[14px] text-neo-black/50"
+                    title="Bets are placed for the next round to keep timing fair for everyone."
+                  >
+                    help
+                  </span>
+                </div>
                 <div className="flex gap-4 items-end">
                   <div className="flex flex-col items-center">
                     <div className="bg-white border-4 border-neo-black px-6 py-4 text-6xl font-display shadow-neo-sm leading-none rounded-xl">
