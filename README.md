@@ -1,4 +1,11 @@
+![Preview](image.png)
+
 # BTCUPDOWN60 - FHEVM BTC Up/Down Demo 🚀
+
+Quick highlights ⚡
+- Simple FHE bet game: bet directions stay private until reveal.
+- Fully on-chain + serverless: bet/claim/reveal work via contract calls even if any UI/server is down.
+- Chainlink Automation finalizes rounds automatically (anyone can still trigger on-chain finalize; contract guards early reveals).
 
 A privacy-preserving BTC up/down prediction market built with FHEVM. Users bet only on the next 60-minute round. Stake amount is public, while the direction (up/down) stays encrypted until reveal.
 
