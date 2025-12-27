@@ -62,6 +62,7 @@ const LOCAL_SUBMISSIONS_KEY = 'btcUpDownLocalSubmissions';
 const LOCAL_FEED_KEY = 'btcUpDownLiveFeed';
 const LOCAL_FEED_BLOCK_KEY = 'btcUpDownLiveFeedLastBlock';
 const LOCAL_DEPLOY_BLOCK_KEY = 'btcUpDownDeployBlock';
+const LOCAL_LAST_ADDRESS_KEY = 'btcUpDownLastAddress';
 const SEPOLIA_TX_URL = 'https://sepolia.etherscan.io/tx/';
 const SEPOLIA_DEPLOY_BLOCK = 9915377;
 
@@ -69,6 +70,13 @@ const formatAddress = (value: string) => {
   if (!value) return '';
   return `${value.slice(0, 6)}...${value.slice(-4)}`;
 };
+
+const formatShortAddress = (value: string) => {
+  if (!value) return '';
+  return `${value.slice(0, 4)}...${value.slice(-3)}`;
+};
+
+const normalizeAddress = (value?: string | null) => (value ? value.toLowerCase() : '');
 
 const formatTxHash = (value?: string | null) => {
   if (!value) return '';
@@ -110,7 +118,7 @@ const formatLocalTime = (timestamp?: number | null) => {
 type LocalSubmission = {
   id: string;
   roundId: number;
-  direction: 'up' | 'down';
+  direction: 'up' | 'down' | 'unknown';
   timestamp: number;
   address?: string;
   txHash?: string;
@@ -191,6 +199,7 @@ export default function BtcUpDownPage() {
   const [feedSyncStatus, setFeedSyncStatus] = useState('');
   const [feedSyncProgress, setFeedSyncProgress] = useState<number | null>(null);
   const [feedSyncError, setFeedSyncError] = useState('');
+  const [cachedAddress, setCachedAddress] = useState('');
   const [userStats, setUserStats] = useState<{
     totalBets: number;
     totalWins: number;
@@ -207,6 +216,7 @@ export default function BtcUpDownPage() {
   const [clientNow, setClientNow] = useState(0);
   const isOnSepolia = chainId === SEPOLIA_CHAIN_ID;
   const publicProvider = useMemo(() => new ethers.JsonRpcProvider(PUBLIC_RPC_URL), []);
+  const logProvider = publicProvider;
   const readProvider = useMemo(() => {
     if (isConnected && isOnSepolia && typeof window !== 'undefined' && window.ethereum) {
       return new ethers.BrowserProvider(window.ethereum);
@@ -221,11 +231,15 @@ export default function BtcUpDownPage() {
     if (!readContractAddress || readContractAddress === ethers.ZeroAddress) return '';
     return `${LOCAL_DEPLOY_BLOCK_KEY}:${readChainId}:${readContractAddress.toLowerCase()}`;
   }, [readChainId, readContractAddress]);
+  const lastAddressKey = useMemo(() => {
+    if (!readContractAddress || readContractAddress === ethers.ZeroAddress) return '';
+    return `${LOCAL_LAST_ADDRESS_KEY}:${readChainId}:${readContractAddress.toLowerCase()}`;
+  }, [readChainId, readContractAddress]);
   const localSubmissionsKey = useMemo(() => {
     if (!readContractAddress || readContractAddress === ethers.ZeroAddress) return '';
-    const owner = address ? address.toLowerCase() : 'anon';
+    const owner = (address || cachedAddress || 'anon').toLowerCase();
     return `${LOCAL_SUBMISSIONS_KEY}:${readChainId}:${readContractAddress.toLowerCase()}:${owner}`;
-  }, [address, readChainId, readContractAddress]);
+  }, [address, cachedAddress, readChainId, readContractAddress]);
   const feedBlockKey = feedStorageKey ? `${feedStorageKey}:${LOCAL_FEED_BLOCK_KEY}` : '';
   const totalsRevealed = roundTotals?.totalsRevealed ?? false;
   const isPendingReveal = !roundTotals || !roundTotals.totalsRevealed || !roundTotals.resultSet;
@@ -245,6 +259,37 @@ export default function BtcUpDownPage() {
       document.body.classList.remove('btc-updown-body');
     };
   }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !lastAddressKey) return;
+    const stored = window.localStorage.getItem(lastAddressKey);
+    if (stored) {
+      setCachedAddress(stored);
+      return;
+    }
+    if (!address && readContractAddress && readContractAddress !== ethers.ZeroAddress) {
+      const prefix = `${LOCAL_SUBMISSIONS_KEY}:${readChainId}:${readContractAddress.toLowerCase()}:`;
+      const candidates = Object.keys(window.localStorage).filter((key) =>
+        key.startsWith(prefix)
+      );
+      const inferred = candidates
+        .map((key) => key.slice(prefix.length))
+        .find((value) => value && value !== 'anon');
+      if (inferred) {
+        window.localStorage.setItem(lastAddressKey, inferred);
+        setCachedAddress(inferred);
+        return;
+      }
+    }
+    setCachedAddress('');
+  }, [address, lastAddressKey, readChainId, readContractAddress]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !lastAddressKey || !address) return;
+    const normalized = address.toLowerCase();
+    window.localStorage.setItem(lastAddressKey, normalized);
+    setCachedAddress(normalized);
+  }, [address, lastAddressKey]);
 
   useEffect(() => {
     if (typeof window === 'undefined' || !localSubmissionsKey) return;
@@ -597,6 +642,114 @@ export default function BtcUpDownPage() {
     };
   }, []);
 
+  const mergeFeedEvents = (prev: FeedEvent[], incoming: FeedEvent[]) => {
+    if (!incoming.length) return prev;
+    const merged = new Map<string, FeedEvent>();
+    [...prev, ...incoming].forEach((item) => {
+      merged.set(item.id, item);
+    });
+    return Array.from(merged.values())
+      .sort((a, b) => {
+        if (b.blockNumber !== a.blockNumber) {
+          return b.blockNumber - a.blockNumber;
+        }
+        return b.logIndex - a.logIndex;
+      })
+      .slice(0, 20);
+  };
+
+  const parseReceiptLogs = (
+    receipt: ethers.TransactionReceipt,
+    iface: ethers.Interface,
+    contractAddr: string
+  ) => {
+    const mapped: FeedEvent[] = [];
+    receipt.logs.forEach((log) => {
+      if (log.address.toLowerCase() !== contractAddr.toLowerCase()) return;
+      try {
+        const parsed = iface.parseLog({ topics: log.topics, data: log.data });
+        const base = {
+          id: `${log.transactionHash}-${log.index ?? 0}`,
+          txHash: log.transactionHash,
+          blockNumber: log.blockNumber ?? 0,
+          logIndex: log.index ?? 0,
+        };
+        if (parsed.name === 'BetPlaced') {
+          mapped.push({
+            ...base,
+            type: 'bet',
+            user: parsed.args?.user as string,
+            roundId: Number(parsed.args?.roundId ?? 0),
+            amountEth: ethers.formatEther(parsed.args?.stake ?? 0n),
+          });
+        } else if (parsed.name === 'ClaimPaid') {
+          mapped.push({
+            ...base,
+            type: 'claim',
+            user: parsed.args?.user as string,
+            roundId: Number(parsed.args?.roundId ?? 0),
+            amountEth: ethers.formatEther(parsed.args?.payout ?? 0n),
+          });
+        } else if (parsed.name === 'RoundInitialized') {
+          mapped.push({
+            ...base,
+            type: 'round-init',
+            roundId: Number(parsed.args?.roundId ?? 0),
+            startTime: Number(parsed.args?.startTime ?? 0),
+            endTime: Number(parsed.args?.endTime ?? 0),
+          });
+        } else if (parsed.name === 'RoundFinalized') {
+          mapped.push({
+            ...base,
+            type: 'round-final',
+            roundId: Number(parsed.args?.roundId ?? 0),
+            startPrice: parsed.args?.startPrice?.toString?.(),
+            endPrice: parsed.args?.endPrice?.toString?.(),
+            result: Number(parsed.args?.result ?? 0),
+          });
+        }
+      } catch (err) {
+        return;
+      }
+    });
+    return mapped;
+  };
+
+  useEffect(() => {
+    if (!feedEvents.length) return;
+    const owner = normalizeAddress(address || cachedAddress);
+    if (!owner) return;
+    const betEvents = feedEvents.filter(
+      (event) => event.type === 'bet' && normalizeAddress(event.user) === owner
+    );
+    if (!betEvents.length) return;
+    setLocalSubmissions((prev) => {
+      const existingTx = new Set(
+        prev.map((item) => normalizeAddress(item.txHash)).filter(Boolean)
+      );
+      const existingRounds = new Set(
+        prev.map((item) => `${item.roundId}:${normalizeAddress(item.address)}`)
+      );
+      const additions: LocalSubmission[] = [];
+      betEvents.forEach((event) => {
+        const txKey = normalizeAddress(event.txHash);
+        if (txKey && existingTx.has(txKey)) return;
+        const roundKey = `${event.roundId}:${owner}`;
+        if (existingRounds.has(roundKey)) return;
+        additions.push({
+          id: `${event.roundId}-${event.blockNumber}-${event.txHash}`,
+          roundId: event.roundId,
+          direction: 'unknown',
+          timestamp: Date.now(),
+          address: event.user || owner,
+          txHash: event.txHash,
+        });
+      });
+      if (!additions.length) return prev;
+      return [...additions, ...prev].slice(0, 6);
+    });
+  }, [feedEvents, address, cachedAddress]);
+
   useEffect(() => {
     if (hasReadContract) return;
     setRoundTotals(null);
@@ -610,7 +763,7 @@ export default function BtcUpDownPage() {
   useEffect(() => {
     if (!hasReadContract || !feedStorageKey) return;
     let isActive = true;
-    const contract = new ethers.Contract(readContractAddress, CONTRACT_ABI, readProvider);
+    const contract = new ethers.Contract(readContractAddress, CONTRACT_ABI, logProvider);
     const eventTopics = [
       contract.interface.getEvent('BetPlaced').topicHash,
       contract.interface.getEvent('ClaimPaid').topicHash,
@@ -630,7 +783,7 @@ export default function BtcUpDownPage() {
           setFeedSyncProgress(null);
           setFeedSyncError('');
         }
-        const latestBlock = await readProvider.getBlockNumber();
+        const latestBlock = await logProvider.getBlockNumber();
         let fromBlock: number | null = null;
         if (lastIndexedBlock !== null) {
           fromBlock = Math.max(lastIndexedBlock - 50, 0);
@@ -659,37 +812,37 @@ export default function BtcUpDownPage() {
         if (!isActive) return;
         const mapped = [
           ...betEvents.map((event) => ({
-            id: `${event.transactionHash}-${event.logIndex}`,
+            id: `${event.transactionHash}-${event.logIndex ?? event.index ?? 0}`,
             type: 'bet' as const,
             user: event.args?.user as string,
             roundId: Number(event.args?.roundId ?? 0),
             amountEth: ethers.formatEther(event.args?.stake ?? 0n),
             txHash: event.transactionHash,
             blockNumber: event.blockNumber ?? 0,
-            logIndex: event.logIndex ?? 0,
+            logIndex: event.logIndex ?? event.index ?? 0,
           })),
           ...claimEvents.map((event) => ({
-            id: `${event.transactionHash}-${event.logIndex}`,
+            id: `${event.transactionHash}-${event.logIndex ?? event.index ?? 0}`,
             type: 'claim' as const,
             user: event.args?.user as string,
             roundId: Number(event.args?.roundId ?? 0),
             amountEth: ethers.formatEther(event.args?.payout ?? 0n),
             txHash: event.transactionHash,
             blockNumber: event.blockNumber ?? 0,
-            logIndex: event.logIndex ?? 0,
+            logIndex: event.logIndex ?? event.index ?? 0,
           })),
           ...initEvents.map((event) => ({
-            id: `${event.transactionHash}-${event.logIndex}`,
+            id: `${event.transactionHash}-${event.logIndex ?? event.index ?? 0}`,
             type: 'round-init' as const,
             roundId: Number(event.args?.roundId ?? 0),
             startTime: Number(event.args?.startTime ?? 0),
             endTime: Number(event.args?.endTime ?? 0),
             txHash: event.transactionHash,
             blockNumber: event.blockNumber ?? 0,
-            logIndex: event.logIndex ?? 0,
+            logIndex: event.logIndex ?? event.index ?? 0,
           })),
           ...finalizeEvents.map((event) => ({
-            id: `${event.transactionHash}-${event.logIndex}`,
+            id: `${event.transactionHash}-${event.logIndex ?? event.index ?? 0}`,
             type: 'round-final' as const,
             roundId: Number(event.args?.roundId ?? 0),
             startPrice: event.args?.startPrice?.toString?.(),
@@ -697,25 +850,12 @@ export default function BtcUpDownPage() {
             result: Number(event.args?.result ?? 0),
             txHash: event.transactionHash,
             blockNumber: event.blockNumber ?? 0,
-            logIndex: event.logIndex ?? 0,
+            logIndex: event.logIndex ?? event.index ?? 0,
           })),
         ];
 
         if (mapped.length) {
-          setFeedEvents((prev) => {
-            const merged = new Map<string, FeedEvent>();
-            [...prev, ...mapped].forEach((item) => {
-              merged.set(item.id, item);
-            });
-            return Array.from(merged.values())
-              .sort((a, b) => {
-                if (b.blockNumber !== a.blockNumber) {
-                  return b.blockNumber - a.blockNumber;
-                }
-                return b.logIndex - a.logIndex;
-              })
-              .slice(0, 20);
-          });
+          setFeedEvents((prev) => mergeFeedEvents(prev, mapped));
         }
         setLastIndexedBlock(latestBlock);
         if (lastIndexedBlock === null) {
@@ -740,7 +880,7 @@ export default function BtcUpDownPage() {
   }, [
     hasReadContract,
     readContractAddress,
-    readProvider,
+    logProvider,
     feedStorageKey,
     lastIndexedBlock,
     deploymentBlock,
@@ -853,7 +993,18 @@ export default function BtcUpDownPage() {
       const value = stakeAmount ?? ethers.parseEther(STAKE_ETH);
       setBetLoadingText('Submitting bet...');
       const tx = await contract.placeBet(targetRound, encryptedData, proof, { value });
-      await tx.wait();
+      const receipt = await tx.wait();
+      if (receipt) {
+        const receiptEvents = parseReceiptLogs(receipt, contract.interface, addressForChain);
+        if (receiptEvents.length) {
+          setFeedEvents((prev) => mergeFeedEvents(prev, receiptEvents));
+        }
+        if (receipt.blockNumber) {
+          setLastIndexedBlock((prev) =>
+            prev === null ? receipt.blockNumber : Math.max(prev, receipt.blockNumber)
+          );
+        }
+      }
       handleLocalSubmit(directionValue, targetRound, tx.hash);
       setHasActiveBet(true);
     } catch (err: any) {
@@ -1036,6 +1187,7 @@ export default function BtcUpDownPage() {
   }, [blockTimestamp, blockFetchedAt, clientNow]);
   const displaySubmissions = localSubmissions.slice(0, 3);
   const displayRoundId = currentRound ?? 9284;
+  const displayTargetRoundId = targetRoundId ?? displayRoundId + 1;
   const displayFeedEvents = feedEvents.slice(0, 10);
   const isInitialSync = lastIndexedBlock === null;
   const feedHint = !hasReadContract
@@ -1062,7 +1214,11 @@ export default function BtcUpDownPage() {
         : 'text-white';
   const getFeedUserLabel = (event: FeedEvent) => {
     if (event.type === 'bet' || event.type === 'claim') {
-      return formatAddress(event.user || '');
+      const user = event.user || '';
+      if (normalizeAddress(user) && normalizeAddress(address) === normalizeAddress(user)) {
+        return 'Me';
+      }
+      return formatShortAddress(user);
     }
     return 'SYSTEM';
   };
@@ -1217,7 +1373,7 @@ export default function BtcUpDownPage() {
         <div className="lg:col-span-8 flex flex-col gap-10">
           <div className="border-6 border-neo-black bg-white p-8 shadow-neo relative rounded-2xl">
             <div className="absolute -top-6 -right-4 bg-secondary text-white font-display px-6 py-2 border-3 border-neo-black uppercase text-lg transform rotate-6 shadow-neo-sm z-10">
-              Round #{displayRoundId} Live
+              Betting on #{displayTargetRoundId}
             </div>
             <div className="flex flex-col md:flex-row justify-between items-end gap-8">
               <div>
@@ -1409,6 +1565,7 @@ export default function BtcUpDownPage() {
                       const isSameWallet = hasActiveWallet && !!addressLower && addressLower === currentAddressLower;
                       const canClaimBase = isSameWallet && isOnSepolia && hasContract;
                       const claimInFlight = claimingRoundId === submission.roundId;
+                      const directionKnown = submission.direction === 'up' || submission.direction === 'down';
 
                       let claimLabel = 'Pending';
                       let claimEnabled = false;
@@ -1433,14 +1590,18 @@ export default function BtcUpDownPage() {
                         claimLabel = meta.claimRequested ? 'Finalize' : 'Claim';
                         claimEnabled = canClaimBase;
                         claimBadgeClass = 'bg-secondary text-white';
+                      } else if (!meta.totalsRevealed) {
+                        claimLabel = 'Reveal pending';
+                      } else if (!directionKnown) {
+                        claimLabel = meta.claimRequested ? 'Finalize' : 'Claim';
+                        claimEnabled = canClaimBase;
+                        claimBadgeClass = 'bg-secondary text-white';
                       } else {
                         const isWinner =
                           (meta.result === 1 && submission.direction === 'up') ||
                           (meta.result === 2 && submission.direction === 'down');
                         if (!isWinner) {
                           claimLabel = 'Lost';
-                        } else if (!meta.totalsRevealed) {
-                          claimLabel = 'Reveal pending';
                         } else {
                           claimLabel = meta.claimRequested ? 'Finalize' : 'Claim';
                           claimEnabled = canClaimBase;
@@ -1478,10 +1639,14 @@ export default function BtcUpDownPage() {
                                 className={
                                   submission.direction === 'up'
                                     ? 'bg-[#0bda0b] text-white text-xs font-display px-2 py-1 border-2 border-neo-black uppercase shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
-                                    : 'bg-[#ff3333] text-white text-xs font-display px-2 py-1 border-2 border-neo-black uppercase shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
+                                    : submission.direction === 'down'
+                                      ? 'bg-[#ff3333] text-white text-xs font-display px-2 py-1 border-2 border-neo-black uppercase shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
+                                      : 'bg-gray-200 text-neo-black text-xs font-display px-2 py-1 border-2 border-neo-black uppercase shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
                                 }
                               >
-                                {submission.direction.toUpperCase()}
+                                {submission.direction === 'unknown'
+                                  ? 'HIDDEN'
+                                  : submission.direction.toUpperCase()}
                               </span>
                               {claimEnabled ? (
                                 <button
@@ -1617,12 +1782,12 @@ export default function BtcUpDownPage() {
                           className="border-b-2 border-neo-black/10 hover:bg-yellow-50 transition-colors"
                           key={event.id}
                         >
-                        <td className="p-3 font-mono font-bold text-neo-black/80">
+                        <td className="p-3 font-mono font-bold text-neo-black/80 text-xs max-w-[90px] truncate">
                           {getFeedUserLabel(event)}
                         </td>
                         <td className="p-3 text-center">
                             <span
-                              className={`${actionClass} text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase whitespace-nowrap min-w-[84px] inline-flex justify-center`}
+                              className={`${actionClass} text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase whitespace-nowrap w-[104px] inline-flex justify-center`}
                             >
                               {actionLabel}
                             </span>
