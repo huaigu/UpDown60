@@ -1468,7 +1468,6 @@ export default function BtcUpDownPage() {
   const displaySubmissions = localSubmissions.slice(0, 3);
   const displayRoundId = currentRound ?? 9284;
   const displayTargetRoundId = targetRoundId ?? displayRoundId + 1;
-  const displayFeedEvents = feedEvents.slice(0, 10);
   const isInitialSync = lastIndexedBlock === null;
   const feedHint = !hasReadContract
     ? 'Contract address missing.'
@@ -1477,6 +1476,70 @@ export default function BtcUpDownPage() {
         : isInitialSync
         ? feedSyncStatus || 'Syncing history from deployment...'
         : `Live. Synced to block #${lastIndexedBlock ?? '--'}. Round events, bets, and claims appear here.`;
+  const displayRoundGroups = useMemo(() => {
+    const byRound = new Map<
+      number,
+      {
+        roundId: number;
+        init?: FeedEvent;
+        final?: FeedEvent;
+        activity: FeedEvent[];
+        lastBlock: number;
+        lastLogIndex: number;
+      }
+    >();
+    const isNewer = (candidate: FeedEvent, existing?: FeedEvent) => {
+      if (!existing) return true;
+      if (candidate.blockNumber !== existing.blockNumber) {
+        return candidate.blockNumber > existing.blockNumber;
+      }
+      return candidate.logIndex > existing.logIndex;
+    };
+
+    feedEvents.forEach((event) => {
+      const existing = byRound.get(event.roundId);
+      const base = existing || {
+        roundId: event.roundId,
+        init: undefined,
+        final: undefined,
+        activity: [],
+        lastBlock: event.blockNumber,
+        lastLogIndex: event.logIndex,
+      };
+      if (event.type === 'round-init' && isNewer(event, base.init)) {
+        base.init = event;
+      }
+      if (event.type === 'round-final' && isNewer(event, base.final)) {
+        base.final = event;
+      }
+      if (event.type === 'bet' || event.type === 'claim') {
+        base.activity.push(event);
+      }
+      if (
+        event.blockNumber > base.lastBlock ||
+        (event.blockNumber === base.lastBlock && event.logIndex > base.lastLogIndex)
+      ) {
+        base.lastBlock = event.blockNumber;
+        base.lastLogIndex = event.logIndex;
+      }
+      byRound.set(event.roundId, base);
+    });
+
+    return Array.from(byRound.values())
+      .map((group) => ({
+        ...group,
+        activity: [...group.activity].sort((a, b) => {
+          if (a.blockNumber !== b.blockNumber) return b.blockNumber - a.blockNumber;
+          return b.logIndex - a.logIndex;
+        }),
+      }))
+      .sort((a, b) => {
+        if (a.lastBlock !== b.lastBlock) return b.lastBlock - a.lastBlock;
+        return b.lastLogIndex - a.lastLogIndex;
+      })
+      .slice(0, 6);
+  }, [feedEvents]);
+  const hasFeedContent = displayRoundGroups.length > 0;
   const roundResultId = currentRound && currentRound > 0 ? currentRound - 1 : null;
   const getFeedUserLabel = (event: FeedEvent) => {
     if (event.type === 'bet' || event.type === 'claim') {
@@ -2104,95 +2167,153 @@ export default function BtcUpDownPage() {
                   </span>
                 )}
               </div>
-              <table className="w-full text-left border-collapse table-fixed">
-                <thead className="sticky top-0 bg-gray-100 z-10 border-b-4 border-neo-black shadow-sm">
-                  <tr>
-                    <th className="p-3 text-xs font-display uppercase text-neo-black w-24">User</th>
-                    <th className="p-3 text-xs font-display uppercase text-neo-black text-center w-28">Action</th>
-                    <th className="p-4 text-xs font-display uppercase text-neo-black text-right">Amount</th>
-                  </tr>
-                </thead>
-                <tbody className="text-sm font-medium">
-                  {displayFeedEvents.length ? (
-                    displayFeedEvents.map((event) => {
-                      const isRoundEvent = event.type === 'round-init' || event.type === 'round-final';
-                      const actionLabel =
-                        event.type === 'bet'
-                          ? 'BET'
-                          : event.type === 'claim'
-                            ? 'CLAIM'
-                            : event.type === 'round-init'
-                              ? 'ROUND INIT'
-                              : `FINAL ${getRoundResultLabel(event.result)}`;
-                      const actionClass =
-                        event.type === 'bet'
-                          ? 'bg-neo-black text-white'
-                          : event.type === 'claim'
-                            ? 'bg-primary text-neo-black'
-                            : event.type === 'round-init'
-                              ? 'bg-secondary text-white'
-                              : getRoundResultClass(event.result);
-
-                      return (
-                        <tr
-                          className="border-b-2 border-neo-black/10 hover:bg-yellow-50 transition-colors"
-                          key={event.id}
+              {!hasFeedContent ? (
+                <div className="p-4 text-center text-sm text-neo-black/60">{feedHint}</div>
+              ) : (
+                <div className="p-4 flex flex-col gap-6">
+                  {displayRoundGroups.length ? (
+                    <div className="flex flex-col gap-3">
+                      <span className="text-xs font-display uppercase text-neo-black/60">
+                        Round Timeline
+                      </span>
+                      {displayRoundGroups.map((group, index) => (
+                        <div
+                          className={`border-3 border-neo-black p-3 rounded-xl shadow-neo-sm ${
+                            index % 2 === 0 ? 'bg-gray-100' : 'bg-[#fff7d1]'
+                          }`}
+                          key={`round-${group.roundId}`}
                         >
-                        <td className="p-3 font-mono font-bold text-neo-black/80 text-xs max-w-[90px] truncate">
-                          {getFeedUserLabel(event)}
-                        </td>
-                        <td className="p-3 text-center">
-                            <span
-                              className={`${actionClass} text-xs font-display px-2 py-1 border-2 border-neo-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] uppercase whitespace-nowrap w-[104px] inline-flex justify-center`}
-                            >
-                              {actionLabel}
+                          <div className="flex items-center justify-between">
+                            <span className="font-display uppercase text-sm">
+                              Round #{group.roundId}
                             </span>
-                        </td>
-                          <td className="p-4 text-right font-display">
-                            {isRoundEvent ? (
-                              <div className="flex flex-col items-end gap-1">
-                                <span className="text-sm font-display uppercase">
-                                  Round #{event.roundId}
-                                </span>
-                                {event.type === 'round-init' ? (
-                                  <div className="flex items-center gap-1 text-xs text-neo-black/60 uppercase whitespace-nowrap">
-                                    <span className="material-symbols-outlined text-[14px]">
-                                      schedule
-                                    </span>
-                                    <span>
-                                      {formatLocalTime(event.startTime)}-{formatLocalTime(event.endTime)}
-                                    </span>
-                                  </div>
-                                ) : (
-                                  <div className="flex items-center gap-1 text-xs text-neo-black/60 uppercase whitespace-nowrap">
-                                    <span className="material-symbols-outlined text-[14px]">
-                                      paid
-                                    </span>
-                                    <span>
-                                      ${formatChainlinkPrice(event.startPrice)}-${formatChainlinkPrice(event.endPrice)}
-                                    </span>
-                                  </div>
-                                )}
-                              </div>
+                            {group.final ? (
+                              <span
+                                className={`${getRoundResultClass(
+                                  group.final.result
+                                )} px-3 py-1 border-2 border-neo-black text-xs font-display uppercase shadow-neo-sm`}
+                              >
+                                {getRoundResultLabel(group.final.result)}
+                              </span>
                             ) : (
-                              `${formatEthValue(event.amountEth || '0')} ETH`
+                              <span className="bg-white text-neo-black px-3 py-1 border-2 border-neo-black text-xs font-display uppercase shadow-neo-sm">
+                                Pending
+                              </span>
                             )}
-                          </td>
-                        </tr>
-                      );
-                    })
-                  ) : (
-                    <tr>
-                      <td
-                        className="p-4 text-center text-sm text-neo-black/60"
-                        colSpan={3}
-                      >
-                        {feedHint}
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
+                          </div>
+                          <div className="mt-3 grid grid-cols-1 gap-2 text-xs">
+                            <div className="flex items-center justify-between border-2 border-neo-black bg-white px-3 py-2 rounded-lg">
+                              <div className="flex items-center gap-2">
+                                <span className="material-symbols-outlined text-[14px]">
+                                  schedule
+                                </span>
+                                <span className="font-display uppercase text-neo-black/70">
+                                  Start
+                                </span>
+                              </div>
+                              <span className="font-mono text-neo-black">
+                                {group.init
+                                  ? `${formatLocalTime(group.init.startTime)}-${formatLocalTime(
+                                      group.init.endTime
+                                    )}`
+                                  : 'Pending'}
+                              </span>
+                            </div>
+                            <div className="border-2 border-neo-black bg-white px-3 py-2 rounded-lg">
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                  <span className="material-symbols-outlined text-[14px]">
+                                    bolt
+                                  </span>
+                                  <span className="font-display uppercase text-neo-black/70">
+                                    Activity
+                                  </span>
+                                </div>
+                                {group.activity.length > 2 ? (
+                                  <span className="text-[10px] font-display uppercase text-neo-black/60">
+                                    +{group.activity.length - 2} more
+                                  </span>
+                                ) : null}
+                              </div>
+                              {group.activity.length ? (
+                                <div className="mt-2 flex flex-col gap-2">
+                                  {group.activity.slice(0, 2).map((event) => {
+                                    const finalResult = group.final?.result;
+                                    const hasFinal =
+                                      finalResult === 1 || finalResult === 2 || finalResult === 3;
+                                    const isTie = finalResult === 3;
+                                    let actionLabel = 'PENDING';
+                                    let actionClass = 'bg-gray-200 text-neo-black';
+                                    if (hasFinal) {
+                                      if (isTie) {
+                                        actionLabel = 'TIE';
+                                        actionClass = 'bg-gray-300 text-neo-black';
+                                      } else if (event.type === 'claim') {
+                                        actionLabel = 'WIN';
+                                        actionClass = 'bg-[#0bda0b] text-white';
+                                      } else {
+                                        actionLabel = 'LOST';
+                                        actionClass = 'bg-[#ff3333] text-white';
+                                      }
+                                    } else if (event.type === 'claim') {
+                                      actionLabel = 'WIN';
+                                      actionClass = 'bg-[#0bda0b] text-white';
+                                    }
+                                    return (
+                                      <div
+                                        className="grid grid-cols-[auto_1fr_auto] items-center gap-2 border-2 border-neo-black bg-gray-100 px-2 py-1 rounded-md"
+                                        key={event.id}
+                                      >
+                                        <span className="font-mono text-[10px] text-neo-black max-w-[90px] truncate">
+                                          {getFeedUserLabel(event)}
+                                        </span>
+                                        <span className="font-display text-[10px] text-center">
+                                          {formatEthValue(event.amountEth || '0')} ETH
+                                        </span>
+                                        <span
+                                          className={`${actionClass} text-[10px] font-display px-2 py-1 border-2 border-neo-black uppercase shadow-neo-sm w-[72px] inline-flex justify-center`}
+                                        >
+                                          {actionLabel}
+                                        </span>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              ) : (
+                                <span className="mt-2 block text-[10px] font-display uppercase text-neo-black/50">
+                                  No activity yet
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex items-center justify-between border-2 border-neo-black bg-white px-3 py-2 rounded-lg">
+                              <div className="flex items-center gap-2">
+                                <span className="material-symbols-outlined text-[14px]">
+                                  flag
+                                </span>
+                                <span className="font-display uppercase text-neo-black/70">
+                                  Final
+                                </span>
+                              </div>
+                              {group.final ? (
+                                <div className="flex items-center gap-2 flex-wrap justify-end">
+                                  <span className="text-[10px] font-display uppercase text-neo-black/60">
+                                    ${formatChainlinkPrice(group.final.startPrice)}-
+                                    ${formatChainlinkPrice(group.final.endPrice)}
+                                  </span>
+                                </div>
+                              ) : (
+                                <span className="text-[10px] font-display uppercase text-neo-black/60">
+                                  Pending
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              )}
             </div>
           </div>
         </div>
