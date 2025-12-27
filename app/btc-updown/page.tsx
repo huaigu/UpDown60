@@ -2176,11 +2176,13 @@ export default function BtcUpDownPage() {
                       <span className="text-xs font-display uppercase text-neo-black/60">
                         Round Timeline
                       </span>
-                      {displayRoundGroups.map((group, index) => (
+                      {displayRoundGroups.map((group, index) => {
+                        const isCompactRound = group.activity.length === 0;
+                        return (
                         <div
-                          className={`border-3 border-neo-black p-3 rounded-xl shadow-neo-sm ${
+                          className={`border-3 border-neo-black rounded-xl shadow-neo-sm ${
                             index % 2 === 0 ? 'bg-gray-100' : 'bg-[#fff7d1]'
-                          }`}
+                          } ${isCompactRound ? 'p-2' : 'p-3'}`}
                           key={`round-${group.roundId}`}
                         >
                           <div className="flex items-center justify-between">
@@ -2201,41 +2203,68 @@ export default function BtcUpDownPage() {
                               </span>
                             )}
                           </div>
-                          <div className="mt-3 grid grid-cols-1 gap-2 text-xs">
-                            <div className="flex items-center justify-between border-2 border-neo-black bg-white px-3 py-2 rounded-lg">
-                              <div className="flex items-center gap-2">
-                                <span className="material-symbols-outlined text-[14px]">
+                          {isCompactRound ? (
+                            <div className="mt-2 flex items-center justify-between gap-2 text-[10px] uppercase text-neo-black/60">
+                              <div className="flex items-center gap-1">
+                                <span className="material-symbols-outlined text-[12px]">
                                   schedule
                                 </span>
-                                <span className="font-display uppercase text-neo-black/70">
-                                  Start
+                                <span className="font-display">
+                                  {group.init
+                                    ? `${formatLocalTime(group.init.startTime)}-${formatLocalTime(
+                                        group.init.endTime
+                                      )}`
+                                    : 'Pending'}
                                 </span>
                               </div>
-                              <span className="font-mono text-neo-black">
-                                {group.init
-                                  ? `${formatLocalTime(group.init.startTime)}-${formatLocalTime(
-                                      group.init.endTime
-                                    )}`
-                                  : 'Pending'}
-                              </span>
+                              <div className="flex items-center gap-1">
+                                <span className="material-symbols-outlined text-[12px]">
+                                  flag
+                                </span>
+                                <span className="font-display">
+                                  {group.final
+                                    ? `$${formatChainlinkPrice(group.final.startPrice)}-${formatChainlinkPrice(
+                                        group.final.endPrice
+                                      )}`
+                                    : 'Pending'}
+                                </span>
+                              </div>
                             </div>
-                            <div className="border-2 border-neo-black bg-white px-3 py-2 rounded-lg">
-                              <div className="flex items-center justify-between">
+                          ) : (
+                            <div className="mt-3 grid grid-cols-1 gap-2 text-xs">
+                              <div className="flex items-center justify-between border-2 border-neo-black bg-white px-3 py-2 rounded-lg">
                                 <div className="flex items-center gap-2">
                                   <span className="material-symbols-outlined text-[14px]">
-                                    bolt
+                                    schedule
                                   </span>
                                   <span className="font-display uppercase text-neo-black/70">
-                                    Activity
+                                    Start
                                   </span>
                                 </div>
-                                {group.activity.length > 2 ? (
-                                  <span className="text-[10px] font-display uppercase text-neo-black/60">
-                                    +{group.activity.length - 2} more
-                                  </span>
-                                ) : null}
+                                <span className="font-mono text-neo-black">
+                                  {group.init
+                                    ? `${formatLocalTime(group.init.startTime)}-${formatLocalTime(
+                                        group.init.endTime
+                                      )}`
+                                    : 'Pending'}
+                                </span>
                               </div>
-                              {group.activity.length ? (
+                              <div className="border-2 border-neo-black bg-white px-3 py-2 rounded-lg">
+                                <div className="flex items-center justify-between">
+                                  <div className="flex items-center gap-2">
+                                    <span className="material-symbols-outlined text-[14px]">
+                                      bolt
+                                    </span>
+                                    <span className="font-display uppercase text-neo-black/70">
+                                      Activity
+                                    </span>
+                                  </div>
+                                  {group.activity.length > 2 ? (
+                                    <span className="text-[10px] font-display uppercase text-neo-black/60">
+                                      +{group.activity.length - 2} more
+                                    </span>
+                                  ) : null}
+                                </div>
                                 <div className="mt-2 flex flex-col gap-2">
                                   {group.activity.slice(0, 2).map((event) => {
                                     const finalResult = group.final?.result;
@@ -2279,37 +2308,34 @@ export default function BtcUpDownPage() {
                                     );
                                   })}
                                 </div>
-                              ) : (
-                                <span className="mt-2 block text-[10px] font-display uppercase text-neo-black/50">
-                                  No activity yet
-                                </span>
-                              )}
-                            </div>
-                            <div className="flex items-center justify-between border-2 border-neo-black bg-white px-3 py-2 rounded-lg">
-                              <div className="flex items-center gap-2">
-                                <span className="material-symbols-outlined text-[14px]">
-                                  flag
-                                </span>
-                                <span className="font-display uppercase text-neo-black/70">
-                                  Final
-                                </span>
                               </div>
-                              {group.final ? (
-                                <div className="flex items-center gap-2 flex-wrap justify-end">
-                                  <span className="text-[10px] font-display uppercase text-neo-black/60">
-                                    ${formatChainlinkPrice(group.final.startPrice)}-
-                                    ${formatChainlinkPrice(group.final.endPrice)}
+                              <div className="flex items-center justify-between border-2 border-neo-black bg-white px-3 py-2 rounded-lg">
+                                <div className="flex items-center gap-2">
+                                  <span className="material-symbols-outlined text-[14px]">
+                                    flag
+                                  </span>
+                                  <span className="font-display uppercase text-neo-black/70">
+                                    Final
                                   </span>
                                 </div>
-                              ) : (
-                                <span className="text-[10px] font-display uppercase text-neo-black/60">
-                                  Pending
-                                </span>
-                              )}
+                                {group.final ? (
+                                  <div className="flex items-center gap-2 flex-wrap justify-end">
+                                    <span className="text-[10px] font-display uppercase text-neo-black/60">
+                                      ${formatChainlinkPrice(group.final.startPrice)}-
+                                      ${formatChainlinkPrice(group.final.endPrice)}
+                                    </span>
+                                  </div>
+                                ) : (
+                                  <span className="text-[10px] font-display uppercase text-neo-black/60">
+                                    Pending
+                                  </span>
+                                )}
+                              </div>
                             </div>
-                          </div>
+                          )}
                         </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   ) : null}
                 </div>
