@@ -10,6 +10,8 @@ import {
   initializeFheInstance,
 } from '../../src/lib/fhevmInstance';
 import { useFhevm } from '../providers/FhevmProvider';
+import { useLiveFeed } from '../providers/LiveFeedProvider';
+import type { FeedEvent } from '../providers/LiveFeedProvider';
 
 const CONTRACT_ADDRESSES: Record<number, string> = {
   31337: '0x0000000000000000000000000000000000000000',
@@ -60,14 +62,10 @@ const SEPOLIA_CONFIG = {
   blockExplorerUrls: ['https://sepolia.etherscan.io/'],
 };
 const STAKE_ETH = '0.01';
-const LOCAL_SUBMISSIONS_KEY = 'btcUpDownLocalSubmissions';
-const LOCAL_CLAIM_META_KEY = 'btcUpDownClaimMeta';
-const LOCAL_FEED_KEY = 'btcUpDownLiveFeed';
-const LOCAL_FEED_BLOCK_KEY = 'btcUpDownLiveFeedLastBlock';
-const LOCAL_DEPLOY_BLOCK_KEY = 'btcUpDownDeployBlock';
-const LOCAL_LAST_ADDRESS_KEY = 'btcUpDownLastAddress';
+const LOCAL_SUBMISSIONS_KEY = 'btcUpDownLocalSubmissionsV2';
+const LOCAL_CLAIM_META_KEY = 'btcUpDownClaimMetaV2';
+const LOCAL_LAST_ADDRESS_KEY = 'btcUpDownLastAddressV2';
 const SEPOLIA_TX_URL = 'https://sepolia.etherscan.io/tx/';
-const SEPOLIA_DEPLOY_BLOCK = 9922892;
 
 const formatAddress = (value: string) => {
   if (!value) return '';
@@ -127,21 +125,6 @@ type LocalSubmission = {
   txHash?: string;
 };
 
-type FeedEvent = {
-  id: string;
-  type: 'bet' | 'claim' | 'round-init' | 'round-final';
-  user?: string;
-  roundId: number;
-  amountEth?: string;
-  startTime?: number;
-  endTime?: number;
-  startPrice?: string;
-  endPrice?: string;
-  result?: number;
-  txHash: string;
-  blockNumber: number;
-  logIndex: number;
-};
 
 type ClaimRoundMeta = {
   resultSet: boolean;
@@ -173,6 +156,14 @@ export default function BtcUpDownPage() {
     error,
     chainId,
   } = useFhevm();
+  const {
+    feedEvents,
+    lastIndexedBlock,
+    feedSyncStatus,
+    feedSyncProgress,
+    feedSyncError,
+    addFeedEvents,
+  } = useLiveFeed();
   const contractAddress = useMemo(() => {
     if (!chainId) return '';
     return CONTRACT_ADDRESSES[chainId] || '';
@@ -185,8 +176,6 @@ export default function BtcUpDownPage() {
   const [isSwitchingNetwork, setIsSwitchingNetwork] = useState(false);
   const [networkError, setNetworkError] = useState('');
   const [localSubmissions, setLocalSubmissions] = useState<LocalSubmission[]>([]);
-  const [feedEvents, setFeedEvents] = useState<FeedEvent[]>([]);
-  const [lastIndexedBlock, setLastIndexedBlock] = useState<number | null>(null);
   const [roundTotals, setRoundTotals] = useState<RoundTotals | null>(null);
   const [currentRound, setCurrentRound] = useState<number | null>(null);
   const [stakeAmount, setStakeAmount] = useState<bigint | null>(null);
@@ -201,10 +190,6 @@ export default function BtcUpDownPage() {
   const [directionDecryptingRoundId, setDirectionDecryptingRoundId] = useState<number | null>(null);
   const [directionDecryptStatusByRound, setDirectionDecryptStatusByRound] = useState<Record<number, string>>({});
   const [directionDecryptErrorByRound, setDirectionDecryptErrorByRound] = useState<Record<number, string>>({});
-  const [deploymentBlock, setDeploymentBlock] = useState<number | null>(SEPOLIA_DEPLOY_BLOCK);
-  const [feedSyncStatus, setFeedSyncStatus] = useState('');
-  const [feedSyncProgress, setFeedSyncProgress] = useState<number | null>(null);
-  const [feedSyncError, setFeedSyncError] = useState('');
   const [cachedAddress, setCachedAddress] = useState('');
   const [submissionsLoadedKey, setSubmissionsLoadedKey] = useState('');
   const [userStats, setUserStats] = useState<{
@@ -223,21 +208,12 @@ export default function BtcUpDownPage() {
   const [clientNow, setClientNow] = useState(0);
   const isOnSepolia = chainId === SEPOLIA_CHAIN_ID;
   const publicProvider = useMemo(() => new ethers.JsonRpcProvider(PUBLIC_RPC_URL), []);
-  const logProvider = publicProvider;
   const readProvider = useMemo(() => {
     if (isConnected && isOnSepolia && typeof window !== 'undefined' && window.ethereum) {
       return new ethers.BrowserProvider(window.ethereum);
     }
     return publicProvider;
   }, [isConnected, isOnSepolia, publicProvider]);
-  const feedStorageKey = useMemo(() => {
-    if (!readContractAddress || readContractAddress === ethers.ZeroAddress) return '';
-    return `${LOCAL_FEED_KEY}:${readChainId}:${readContractAddress.toLowerCase()}`;
-  }, [readChainId, readContractAddress]);
-  const deployBlockKey = useMemo(() => {
-    if (!readContractAddress || readContractAddress === ethers.ZeroAddress) return '';
-    return `${LOCAL_DEPLOY_BLOCK_KEY}:${readChainId}:${readContractAddress.toLowerCase()}`;
-  }, [readChainId, readContractAddress]);
   const lastAddressKey = useMemo(() => {
     if (!readContractAddress || readContractAddress === ethers.ZeroAddress) return '';
     return `${LOCAL_LAST_ADDRESS_KEY}:${readChainId}:${readContractAddress.toLowerCase()}`;
@@ -285,7 +261,6 @@ export default function BtcUpDownPage() {
     [persistClaimMeta]
   );
 
-  const feedBlockKey = feedStorageKey ? `${feedStorageKey}:${LOCAL_FEED_BLOCK_KEY}` : '';
   const totalsRevealed = roundTotals?.totalsRevealed ?? false;
   const isPendingReveal = !roundTotals || !roundTotals.totalsRevealed || !roundTotals.resultSet;
   const stakeEth = stakeAmount ? ethers.formatEther(stakeAmount) : STAKE_ETH;
@@ -410,34 +385,6 @@ export default function BtcUpDownPage() {
     window.localStorage.setItem(localSubmissionsKey, JSON.stringify(localSubmissions));
   }, [localSubmissions, localSubmissionsKey, submissionsLoadedKey]);
 
-
-  useEffect(() => {
-    if (typeof window === 'undefined' || !feedStorageKey) return;
-    const stored = window.localStorage.getItem(feedStorageKey);
-    if (stored) {
-      try {
-        const parsed = JSON.parse(stored) as FeedEvent[];
-        if (Array.isArray(parsed)) {
-          setFeedEvents(parsed);
-        } else {
-          setFeedEvents([]);
-        }
-      } catch (err) {
-        console.warn('Failed to parse feed cache', err);
-        setFeedEvents([]);
-      }
-    } else {
-      setFeedEvents([]);
-    }
-    const storedBlock = window.localStorage.getItem(feedBlockKey);
-    if (storedBlock) {
-      const parsedBlock = Number(storedBlock);
-      setLastIndexedBlock(Number.isNaN(parsedBlock) ? null : parsedBlock);
-    } else {
-      setLastIndexedBlock(null);
-    }
-  }, [feedStorageKey, feedBlockKey]);
-
   useEffect(() => {
     if (!placeCardRef.current) return;
     const element = placeCardRef.current;
@@ -449,28 +396,6 @@ export default function BtcUpDownPage() {
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
-
-  useEffect(() => {
-    if (typeof window === 'undefined' || !deployBlockKey) return;
-    const storedDeploy = window.localStorage.getItem(deployBlockKey);
-    if (!storedDeploy && lastIndexedBlock !== null) {
-      if (feedBlockKey) {
-        window.localStorage.removeItem(feedBlockKey);
-      }
-      setLastIndexedBlock(null);
-      setFeedEvents([]);
-    }
-    window.localStorage.setItem(deployBlockKey, String(SEPOLIA_DEPLOY_BLOCK));
-    setDeploymentBlock(SEPOLIA_DEPLOY_BLOCK);
-  }, [deployBlockKey, feedBlockKey, lastIndexedBlock]);
-
-  useEffect(() => {
-    if (typeof window === 'undefined' || !feedStorageKey) return;
-    window.localStorage.setItem(feedStorageKey, JSON.stringify(feedEvents));
-    if (lastIndexedBlock !== null) {
-      window.localStorage.setItem(feedBlockKey, String(lastIndexedBlock));
-    }
-  }, [feedEvents, feedStorageKey, feedBlockKey, lastIndexedBlock]);
 
   useEffect(() => {
     setClientNow(Date.now());
@@ -721,44 +646,6 @@ export default function BtcUpDownPage() {
     };
   }, []);
 
-  const mergeFeedEvents = (prev: FeedEvent[], incoming: FeedEvent[]) => {
-    if (!incoming.length) return prev;
-    const merged = new Map<string, FeedEvent>();
-    [...prev, ...incoming].forEach((item) => {
-      merged.set(item.id, item);
-    });
-    const typePriority: Record<FeedEvent['type'], number> = {
-      'round-init': 0,
-      bet: 1,
-      claim: 2,
-      'round-final': 3,
-    };
-    return Array.from(merged.values())
-      .sort((a, b) => {
-        if (a.roundId !== b.roundId) {
-          return b.roundId - a.roundId;
-        }
-        if (a.type !== b.type) {
-          const priorityA = typePriority[a.type] ?? 9;
-          const priorityB = typePriority[b.type] ?? 9;
-          if (priorityA !== priorityB) {
-            return priorityA - priorityB;
-          }
-        }
-        if (b.blockNumber !== a.blockNumber) {
-          return b.blockNumber - a.blockNumber;
-        }
-        return b.logIndex - a.logIndex;
-      })
-      .slice(0, 60);
-  };
-
-  const getEventLogIndex = (event: { logIndex?: number; index?: number }) =>
-    event.logIndex ?? event.index ?? 0;
-
-  const getEventArgs = (event: any) =>
-    (event?.args as Record<string, unknown> | undefined) ?? undefined;
-
   const parseReceiptLogs = (
     receipt: ethers.TransactionReceipt,
     iface: ethers.Interface,
@@ -874,149 +761,7 @@ export default function BtcUpDownPage() {
     setRoundTotals(null);
     setCurrentRound(null);
     setStakeAmount(null);
-    setFeedEvents([]);
-    setLastIndexedBlock(null);
-    setDeploymentBlock(null);
   }, [hasReadContract]);
-
-  useEffect(() => {
-    if (!hasReadContract || !feedStorageKey) return;
-    let isActive = true;
-    const contract = new ethers.Contract(readContractAddress, CONTRACT_ABI, logProvider);
-
-    const resolveDeploymentBlock = async (latestBlock: number) => {
-      if (deploymentBlock !== null) return deploymentBlock;
-      return SEPOLIA_DEPLOY_BLOCK <= latestBlock ? SEPOLIA_DEPLOY_BLOCK : null;
-    };
-
-    const syncFeed = async () => {
-      try {
-        if (lastIndexedBlock === null) {
-          setFeedSyncStatus('Syncing history from deployment...');
-          setFeedSyncProgress(null);
-          setFeedSyncError('');
-        }
-        const latestBlock = await logProvider.getBlockNumber();
-        let fromBlock: number | null = null;
-        if (lastIndexedBlock !== null) {
-          fromBlock = Math.max(lastIndexedBlock - 50, 0);
-        } else {
-          const deployBlock = await resolveDeploymentBlock(latestBlock);
-          if (deployBlock === null) {
-            setFeedSyncError('Feed sync paused (deployment block unavailable).');
-            return;
-          }
-          fromBlock = deployBlock;
-        }
-        if (lastIndexedBlock === null && fromBlock !== null && latestBlock > fromBlock) {
-          const progress = Math.min(
-            100,
-            Math.round(((latestBlock - fromBlock) / Math.max(latestBlock, 1)) * 100)
-          );
-          setFeedSyncProgress(progress);
-        }
-        if (fromBlock > latestBlock) return;
-        const [betEvents, claimEvents, initEvents, finalizeEvents] = await Promise.all([
-          contract.queryFilter(contract.filters.BetPlaced(), fromBlock, latestBlock),
-          contract.queryFilter(contract.filters.ClaimPaid(), fromBlock, latestBlock),
-          contract.queryFilter(contract.filters.RoundInitialized(), fromBlock, latestBlock),
-          contract.queryFilter(contract.filters.RoundFinalized(), fromBlock, latestBlock),
-        ]);
-        if (!isActive) return;
-        const mapped = [
-          ...betEvents.map((event) => {
-            const args = getEventArgs(event);
-            return {
-              id: `${event.transactionHash}-${getEventLogIndex(event)}`,
-              type: 'bet' as const,
-              user: args?.user as string,
-              roundId: Number((args?.roundId as bigint | number | string) ?? 0),
-              amountEth: ethers.formatEther(
-                (args?.stake as bigint | number | string) ?? BigInt(0)
-              ),
-              txHash: event.transactionHash,
-              blockNumber: event.blockNumber ?? 0,
-              logIndex: getEventLogIndex(event),
-            };
-          }),
-          ...claimEvents.map((event) => {
-            const args = getEventArgs(event);
-            return {
-              id: `${event.transactionHash}-${getEventLogIndex(event)}`,
-              type: 'claim' as const,
-              user: args?.user as string,
-              roundId: Number((args?.roundId as bigint | number | string) ?? 0),
-              amountEth: ethers.formatEther(
-                (args?.payout as bigint | number | string) ?? BigInt(0)
-              ),
-              txHash: event.transactionHash,
-              blockNumber: event.blockNumber ?? 0,
-              logIndex: getEventLogIndex(event),
-            };
-          }),
-          ...initEvents.map((event) => {
-            const args = getEventArgs(event);
-            return {
-              id: `${event.transactionHash}-${getEventLogIndex(event)}`,
-              type: 'round-init' as const,
-              roundId: Number((args?.roundId as bigint | number | string) ?? 0),
-              startTime: Number((args?.startTime as bigint | number | string) ?? 0),
-              endTime: Number((args?.endTime as bigint | number | string) ?? 0),
-              txHash: event.transactionHash,
-              blockNumber: event.blockNumber ?? 0,
-              logIndex: getEventLogIndex(event),
-            };
-          }),
-          ...finalizeEvents.map((event) => {
-            const args = getEventArgs(event);
-            return {
-              id: `${event.transactionHash}-${getEventLogIndex(event)}`,
-              type: 'round-final' as const,
-              roundId: Number((args?.roundId as bigint | number | string) ?? 0),
-              startPrice: (args?.startPrice as bigint | number | string | undefined)
-                ?.toString?.(),
-              endPrice: (args?.endPrice as bigint | number | string | undefined)
-                ?.toString?.(),
-              result: Number((args?.result as bigint | number | string) ?? 0),
-              txHash: event.transactionHash,
-              blockNumber: event.blockNumber ?? 0,
-              logIndex: getEventLogIndex(event),
-            };
-          }),
-        ];
-
-        if (mapped.length) {
-          setFeedEvents((prev) => mergeFeedEvents(prev, mapped));
-        }
-        setLastIndexedBlock(latestBlock);
-        if (lastIndexedBlock === null) {
-          setFeedSyncStatus('');
-          setFeedSyncProgress(null);
-        }
-        setFeedSyncError('');
-      } catch (err) {
-        console.warn('Failed to sync live feed', err);
-        if (lastIndexedBlock === null) {
-          setFeedSyncError('Live feed sync failed. Retrying...');
-        }
-      }
-    };
-
-    syncFeed();
-    const interval = window.setInterval(syncFeed, 15000);
-    return () => {
-      isActive = false;
-      window.clearInterval(interval);
-    };
-  }, [
-    hasReadContract,
-    readContractAddress,
-    logProvider,
-    feedStorageKey,
-    lastIndexedBlock,
-    deploymentBlock,
-    publicProvider,
-  ]);
 
   const ensureSepolia = async () => {
     if (!window.ethereum) {
@@ -1157,13 +902,8 @@ export default function BtcUpDownPage() {
       const receipt = await tx.wait();
       if (receipt) {
         const receiptEvents = parseReceiptLogs(receipt, contract.interface, addressForChain);
-        if (receiptEvents.length) {
-          setFeedEvents((prev) => mergeFeedEvents(prev, receiptEvents));
-        }
-        if (receipt.blockNumber) {
-          setLastIndexedBlock((prev) =>
-            prev === null ? receipt.blockNumber : Math.max(prev, receipt.blockNumber)
-          );
+        if (receiptEvents.length || receipt.blockNumber) {
+          addFeedEvents(receiptEvents, receipt.blockNumber);
         }
       }
       setHasActiveBet(true);
@@ -1684,7 +1424,7 @@ export default function BtcUpDownPage() {
           <nav className="hidden md:flex items-center gap-4">
             <a
               className="bg-white px-6 py-3 text-lg font-display uppercase border-3 border-neo-black shadow-neo-sm hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-none transition-all"
-              href="#"
+              href="/"
             >
               Markets
             </a>

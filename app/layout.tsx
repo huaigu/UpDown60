@@ -1,6 +1,7 @@
 import type { Metadata } from 'next'
 import Script from 'next/script'
 import { FhevmProvider } from './providers/FhevmProvider'
+import { LiveFeedProvider } from './providers/LiveFeedProvider'
 import './globals.css'
 
 export const metadata: Metadata = {
@@ -24,7 +25,7 @@ export default function RootLayout({
           strategy="beforeInteractive"
         />
         <FhevmProvider>
-          {children}
+          <LiveFeedProvider>{children}</LiveFeedProvider>
         </FhevmProvider>
       </body>
     </html>

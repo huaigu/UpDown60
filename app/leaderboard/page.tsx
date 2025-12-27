@@ -1,25 +1,11 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo } from 'react';
 import { ethers } from 'ethers';
 import Link from 'next/link';
+import { useLiveFeed } from '../providers/LiveFeedProvider';
 
-const SEPOLIA_CHAIN_ID = 11155111;
-const CONTRACT_ADDRESS = '0x5F893Cf33715DbaC196229560418C709F0FFA6Ca';
-const LOCAL_FEED_KEY = 'btcUpDownLiveFeed';
-const LOCAL_FEED_BLOCK_KEY = 'btcUpDownLiveFeedLastBlock';
 const STAKE_WEI = ethers.parseEther('0.01');
-
-type FeedEvent = {
-  id: string;
-  type: 'bet' | 'claim' | 'round-init' | 'round-final';
-  user?: string;
-  roundId: number;
-  amountEth?: string;
-  txHash: string;
-  blockNumber: number;
-  logIndex: number;
-};
 
 type LeaderboardEntry = {
   address: string;
@@ -42,55 +28,13 @@ const formatEthValue = (value: string) => {
 const formatEthBigint = (value: bigint) => formatEthValue(ethers.formatEther(value));
 
 export default function LeaderboardPage() {
-  const [feedEvents, setFeedEvents] = useState<FeedEvent[]>([]);
-  const [lastIndexedBlock, setLastIndexedBlock] = useState<number | null>(null);
+  const { feedEvents, lastIndexedBlock } = useLiveFeed();
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
     document.body.classList.add('btc-updown-body');
     return () => {
       document.body.classList.remove('btc-updown-body');
-    };
-  }, []);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const feedStorageKey = `${LOCAL_FEED_KEY}:${SEPOLIA_CHAIN_ID}:${CONTRACT_ADDRESS.toLowerCase()}`;
-    const feedBlockKey = `${feedStorageKey}:${LOCAL_FEED_BLOCK_KEY}`;
-
-    const loadCache = () => {
-      const stored = window.localStorage.getItem(feedStorageKey);
-      if (stored) {
-        try {
-          const parsed = JSON.parse(stored) as FeedEvent[];
-          setFeedEvents(Array.isArray(parsed) ? parsed : []);
-        } catch (err) {
-          console.warn('Failed to parse live feed cache', err);
-          setFeedEvents([]);
-        }
-      } else {
-        setFeedEvents([]);
-      }
-      const storedBlock = window.localStorage.getItem(feedBlockKey);
-      if (storedBlock) {
-        const parsedBlock = Number(storedBlock);
-        setLastIndexedBlock(Number.isNaN(parsedBlock) ? null : parsedBlock);
-      } else {
-        setLastIndexedBlock(null);
-      }
-    };
-
-    loadCache();
-    const interval = window.setInterval(loadCache, 5000);
-    const handleStorage = (event: StorageEvent) => {
-      if (event.key === feedStorageKey || event.key === feedBlockKey) {
-        loadCache();
-      }
-    };
-    window.addEventListener('storage', handleStorage);
-    return () => {
-      window.clearInterval(interval);
-      window.removeEventListener('storage', handleStorage);
     };
   }, []);
 
@@ -103,15 +47,15 @@ export default function LeaderboardPage() {
       const existing = stats.get(user) || {
         address: user,
         bets: 0,
-        wagered: 0n,
-        payout: 0n,
+        wagered: BigInt(0),
+        payout: BigInt(0),
       };
       if (event.type === 'bet') {
         const amountWei = event.amountEth ? ethers.parseEther(event.amountEth) : STAKE_WEI;
         existing.bets += 1;
         existing.wagered += amountWei;
       } else if (event.type === 'claim') {
-        const payoutWei = event.amountEth ? ethers.parseEther(event.amountEth) : 0n;
+        const payoutWei = event.amountEth ? ethers.parseEther(event.amountEth) : BigInt(0);
         existing.payout += payoutWei;
       }
       stats.set(user, existing);
@@ -216,8 +160,7 @@ export default function LeaderboardPage() {
             </div>
           </div>
           <p className="mt-4 text-sm text-neo-black/70">
-            This page re-uses the Live Feed cache from the home page. Open the app to sync the
-            latest events.
+            This page uses the global Live Feed stream, which keeps syncing while the app is open.
           </p>
         </section>
 
@@ -242,8 +185,8 @@ export default function LeaderboardPage() {
                 <tbody>
                   {leaderboard.slice(0, 12).map((entry, index) => {
                     const net = entry.payout - entry.wagered;
-                    const netLabel = net >= 0n ? '+' : '-';
-                    const netValue = net >= 0n ? net : -net;
+                    const netLabel = net >= BigInt(0) ? '+' : '-';
+                    const netValue = net >= BigInt(0) ? net : -net;
                     return (
                       <tr
                         className="border-b-2 border-neo-black/10 hover:bg-yellow-50 transition-colors"
@@ -272,7 +215,7 @@ export default function LeaderboardPage() {
             </div>
           ) : (
             <div className="p-8 text-center text-sm text-neo-black/60">
-              No cached events yet. Open the home page to sync Live Feed data.
+              No events yet. Keep the app open to sync Live Feed data.
             </div>
           )}
         </section>
