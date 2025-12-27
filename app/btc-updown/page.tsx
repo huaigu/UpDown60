@@ -200,6 +200,7 @@ export default function BtcUpDownPage() {
   const [feedSyncProgress, setFeedSyncProgress] = useState<number | null>(null);
   const [feedSyncError, setFeedSyncError] = useState('');
   const [cachedAddress, setCachedAddress] = useState('');
+  const [submissionsLoadedKey, setSubmissionsLoadedKey] = useState('');
   const [userStats, setUserStats] = useState<{
     totalBets: number;
     totalWins: number;
@@ -261,6 +262,15 @@ export default function BtcUpDownPage() {
   }, []);
 
   useEffect(() => {
+    setUserStats(null);
+    setHasActiveBet(false);
+    setClaimMetaByRound({});
+    setClaimStatusByRound({});
+    setClaimErrorByRound({});
+    setClaimingRoundId(null);
+  }, [address]);
+
+  useEffect(() => {
     if (typeof window === 'undefined' || !lastAddressKey) return;
     const stored = window.localStorage.getItem(lastAddressKey);
     if (stored) {
@@ -294,18 +304,18 @@ export default function BtcUpDownPage() {
   useEffect(() => {
     if (typeof window === 'undefined' || !localSubmissionsKey) return;
     const stored = window.localStorage.getItem(localSubmissionsKey);
+    let nextSubmissions: LocalSubmission[] = [];
     if (stored) {
       try {
         const parsed = JSON.parse(stored) as LocalSubmission[];
         if (Array.isArray(parsed)) {
-          setLocalSubmissions(parsed);
-          return;
+          nextSubmissions = parsed;
         }
       } catch (err) {
         console.warn('Failed to parse local submissions cache', err);
       }
     }
-    if (address) {
+    if (!nextSubmissions.length && address) {
       const legacy = window.localStorage.getItem(LOCAL_SUBMISSIONS_KEY);
       if (legacy) {
         try {
@@ -315,9 +325,8 @@ export default function BtcUpDownPage() {
               (item) => item.address?.toLowerCase() === address.toLowerCase()
             );
             if (filtered.length) {
-              setLocalSubmissions(filtered);
+              nextSubmissions = filtered;
               window.localStorage.setItem(localSubmissionsKey, JSON.stringify(filtered));
-              return;
             }
           }
         } catch (err) {
@@ -325,13 +334,20 @@ export default function BtcUpDownPage() {
         }
       }
     }
-    setLocalSubmissions([]);
+    setLocalSubmissions(nextSubmissions);
+    setSubmissionsLoadedKey(localSubmissionsKey);
   }, [localSubmissionsKey, address]);
 
   useEffect(() => {
-    if (typeof window === 'undefined' || !localSubmissionsKey) return;
+    if (
+      typeof window === 'undefined' ||
+      !localSubmissionsKey ||
+      submissionsLoadedKey !== localSubmissionsKey
+    ) {
+      return;
+    }
     window.localStorage.setItem(localSubmissionsKey, JSON.stringify(localSubmissions));
-  }, [localSubmissions, localSubmissionsKey]);
+  }, [localSubmissions, localSubmissionsKey, submissionsLoadedKey]);
 
 
   useEffect(() => {
@@ -727,15 +743,32 @@ export default function BtcUpDownPage() {
       const existingTx = new Set(
         prev.map((item) => normalizeAddress(item.txHash)).filter(Boolean)
       );
-      const existingRounds = new Set(
-        prev.map((item) => `${item.roundId}:${normalizeAddress(item.address)}`)
-      );
+      const existingRoundIndex = new Map<number, number>();
+      const next = [...prev];
+      next.forEach((item, index) => {
+        existingRoundIndex.set(item.roundId, index);
+      });
       const additions: LocalSubmission[] = [];
+      let updated = false;
       betEvents.forEach((event) => {
         const txKey = normalizeAddress(event.txHash);
         if (txKey && existingTx.has(txKey)) return;
-        const roundKey = `${event.roundId}:${owner}`;
-        if (existingRounds.has(roundKey)) return;
+        const existingIndex = existingRoundIndex.get(event.roundId);
+        if (existingIndex !== undefined) {
+          const current = next[existingIndex];
+          let changedItem = current;
+          if (!current.txHash && event.txHash) {
+            changedItem = { ...changedItem, txHash: event.txHash };
+          }
+          if (!current.address && event.user) {
+            changedItem = { ...changedItem, address: event.user };
+          }
+          if (changedItem !== current) {
+            next[existingIndex] = changedItem;
+            updated = true;
+          }
+          return;
+        }
         additions.push({
           id: `${event.roundId}-${event.blockNumber}-${event.txHash}`,
           roundId: event.roundId,
@@ -745,8 +778,8 @@ export default function BtcUpDownPage() {
           txHash: event.txHash,
         });
       });
-      if (!additions.length) return prev;
-      return [...additions, ...prev].slice(0, 6);
+      if (!additions.length && !updated) return prev;
+      return [...additions, ...next].slice(0, 6);
     });
   }, [feedEvents, address, cachedAddress]);
 
