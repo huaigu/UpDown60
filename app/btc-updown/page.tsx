@@ -65,6 +65,16 @@ const formatShortAddress = (value: string) => {
 };
 
 const normalizeAddress = (value?: string | null) => (value ? value.toLowerCase() : '');
+const isNewerFeedEvent = (candidate: FeedEvent, existing: FeedEvent) => {
+  if (candidate.blockNumber !== existing.blockNumber) {
+    return candidate.blockNumber > existing.blockNumber;
+  }
+  return candidate.logIndex > existing.logIndex;
+};
+const sortFeedEventsDesc = (a: FeedEvent, b: FeedEvent) => {
+  if (a.blockNumber !== b.blockNumber) return b.blockNumber - a.blockNumber;
+  return b.logIndex - a.logIndex;
+};
 
 const formatTxHash = (value?: string | null) => {
   if (!value) return '';
@@ -1194,6 +1204,17 @@ export default function BtcUpDownPage() {
     };
   }, [blockTimestamp, blockFetchedAt, clientNow]);
   const displaySubmissions = localSubmissions.slice(0, 3);
+  const localDirectionLookup = useMemo(() => {
+    const map = new Map<string, LocalSubmission['direction']>();
+    localSubmissions.forEach((submission) => {
+      if (!submission.address) return;
+      map.set(
+        `${submission.roundId}:${normalizeAddress(submission.address)}`,
+        submission.direction
+      );
+    });
+    return map;
+  }, [localSubmissions]);
   const displayRoundId = currentRound ?? 9284;
   const displayTargetRoundId = targetRoundId ?? displayRoundId + 1;
   const isInitialSync = lastIndexedBlock === null;
@@ -1959,12 +1980,42 @@ export default function BtcUpDownPage() {
                         ) : null}
                       </div>
                       {pagedRoundGroups.map((group, index) => {
-                        const isCompactRound = group.activity.length === 0;
-                        const hasMoreActivity = group.activity.length > 2;
+                        const mergedActivity = (() => {
+                          const byUser = new Map<string, FeedEvent>();
+                          const unkeyed: FeedEvent[] = [];
+                          group.activity.forEach((event) => {
+                            const userKey = normalizeAddress(event.user);
+                            if (!userKey) {
+                              unkeyed.push(event);
+                              return;
+                            }
+                            const existing = byUser.get(userKey);
+                            if (!existing) {
+                              byUser.set(userKey, event);
+                              return;
+                            }
+                            if (existing.type === 'claim') {
+                              if (event.type === 'claim' && isNewerFeedEvent(event, existing)) {
+                                byUser.set(userKey, event);
+                              }
+                              return;
+                            }
+                            if (event.type === 'claim') {
+                              byUser.set(userKey, event);
+                              return;
+                            }
+                            if (isNewerFeedEvent(event, existing)) {
+                              byUser.set(userKey, event);
+                            }
+                          });
+                          return [...byUser.values(), ...unkeyed].sort(sortFeedEventsDesc);
+                        })();
+                        const isCompactRound = mergedActivity.length === 0;
+                        const hasMoreActivity = mergedActivity.length > 2;
                         const isActivityExpanded = !!expandedActivityByRound[group.roundId];
                         const activityItems = isActivityExpanded
-                          ? group.activity
-                          : group.activity.slice(0, 2);
+                          ? mergedActivity
+                          : mergedActivity.slice(0, 2);
                         return (
                         <div
                           className={`border-3 border-neo-black rounded-xl shadow-neo-sm ${
@@ -2059,7 +2110,7 @@ export default function BtcUpDownPage() {
                                     >
                                       {isActivityExpanded
                                         ? 'Show less'
-                                        : `+${group.activity.length - 2} more`}
+                                        : `+${mergedActivity.length - 2} more`}
                                     </button>
                                   ) : null}
                                 </div>
@@ -2069,22 +2120,36 @@ export default function BtcUpDownPage() {
                                     const hasFinal =
                                       finalResult === 1 || finalResult === 2 || finalResult === 3;
                                     const isTie = finalResult === 3;
+                                    const userKey = normalizeAddress(event.user);
+                                    const localDirection = userKey
+                                      ? localDirectionLookup.get(
+                                          `${group.roundId}:${userKey}`
+                                        )
+                                      : undefined;
+                                    const directionKnown =
+                                      localDirection === 'up' || localDirection === 'down';
                                     let actionLabel = event.type === 'bet' ? 'BET' : 'PENDING';
                                     let actionClass = 'bg-gray-200 text-neo-black';
-                                    if (hasFinal) {
-                                      if (isTie) {
-                                        actionLabel = 'TIE';
-                                        actionClass = 'bg-gray-300 text-neo-black';
-                                      } else if (event.type === 'claim') {
-                                        actionLabel = 'WIN';
-                                        actionClass = 'bg-[#0bda0b] text-white';
-                                      } else {
-                                        actionLabel = 'LOST';
-                                        actionClass = 'bg-[#ff3333] text-white';
-                                      }
-                                    } else if (event.type === 'claim') {
+                                    if (event.type === 'claim') {
                                       actionLabel = 'WIN';
                                       actionClass = 'bg-[#0bda0b] text-white';
+                                    } else if (event.type === 'bet') {
+                                      if (!hasFinal) {
+                                        actionLabel = 'BET';
+                                      } else if (isTie) {
+                                        actionLabel = 'TIE';
+                                        actionClass = 'bg-gray-300 text-neo-black';
+                                      } else if (directionKnown) {
+                                        const isWinner =
+                                          (finalResult === 1 && localDirection === 'up') ||
+                                          (finalResult === 2 && localDirection === 'down');
+                                        actionLabel = isWinner ? 'WIN' : 'LOST';
+                                        actionClass = isWinner
+                                          ? 'bg-[#0bda0b] text-white'
+                                          : 'bg-[#ff3333] text-white';
+                                      } else {
+                                        actionLabel = 'HIDDEN';
+                                      }
                                     }
                                     return (
                                       <div
