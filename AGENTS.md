@@ -43,7 +43,7 @@ Hardhat (smart contracts):
 
 ## FHEVM Initialization, Encryption, and Decryption Flow
 - SDK load: `app/layout.tsx` injects the Relayer SDK script (`relayer-sdk-js.umd.cjs`) so `window.RelayerSDK`/`window.relayerSDK` exists in the browser.
-- Initialization: `app/providers/FhevmProvider.tsx` calls `initializeFheInstance` from `src/lib/fhevmInstance.js`, which runs `initSDK()` (WASM load) and `createInstance({...SepoliaConfig, network: window.ethereum})`, storing the result in a module-scoped `fheInstance`.
-- Trigger: `app/page.tsx` runs `initialize()` after the wallet connects (local `isConnected` state), so initialization is gated by MetaMask and the Relayer SDK being present.
+- Initialization: `app/providers/FhevmProvider.tsx` calls `initializeFheInstance` from `src/lib/fhevmInstance.js`, which runs `initSDK()` (WASM load) and `createInstance({...SepoliaConfig, network: walletProvider})`, storing the result in a module-scoped `fheInstance`.
+- Trigger: pages call `initialize()` after a Reown AppKit wallet connection, so initialization is gated by the wallet provider and the Relayer SDK being present.
 - Encryption (`createEncryptedInput`): `src/lib/fhevmInstance.js` builds an input handle with `fhe.createEncryptedInput(contractAddress, userAddress)`, appends the value via `add32`, then `encrypt()`; it normalizes SDK output to `{ encryptedData, proof }` (prefers `handles[0]` + `inputProof` when present).
 - Decryption: `decryptValue` uses EIP-712 user decryption (`generateKeypair` + `createEIP712` + `signTypedData` + `userDecrypt`); public flows use `publicDecrypt` for single handles and `decryptMultipleHandles` for multiple handles with proofs. Components (`components/FheCounter.tsx`, `components/FheRatings.tsx`, `components/FheVoting.tsx`) hexlify `Uint8Array` outputs before contract calls.

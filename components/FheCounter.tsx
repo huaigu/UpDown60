@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { ethers } from 'ethers';
 import { decryptValue, createEncryptedInput } from '../src/lib/fhevmInstance';
+import { useFhevm } from '../app/providers/FhevmProvider';
 
 
 // Contract configuration
@@ -42,14 +43,11 @@ const CONTRACT_ABI = [
 ]
 
 interface FheCounterProps {
-  account: string;
-  chainId: number;
-  isConnected: boolean;
-  isInitialized: boolean;
   onMessage: (message: string) => void;
 }
 
-export default function FheCounter({ account, chainId, isConnected, isInitialized, onMessage }: FheCounterProps) {
+export default function FheCounter({ onMessage }: FheCounterProps) {
+  const { address, chainId, isConnected, isInitialized, walletProvider } = useFhevm();
   const [countHandle, setCountHandle] = useState<string>('');
   const [decryptedCount, setDecryptedCount] = useState<number | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -62,11 +60,11 @@ export default function FheCounter({ account, chainId, isConnected, isInitialize
 
   // Get encrypted count from contract
   const getCount = async () => {
-    if (!isConnected || !contractAddress || !window.ethereum || contractAddress === 'Not supported chain') return;
+    if (!isConnected || !contractAddress || !walletProvider || contractAddress === 'Not supported chain') return;
     
     try {
       onMessage('Reading contract...');
-      const provider = new ethers.BrowserProvider(window.ethereum);
+      const provider = new ethers.BrowserProvider(walletProvider);
       const contract = new ethers.Contract(contractAddress, CONTRACT_ABI, provider);
       const result = await contract.getCount();
       setCountHandle(result);
@@ -80,7 +78,7 @@ export default function FheCounter({ account, chainId, isConnected, isInitialize
 
   // Decrypt count using fhevmInstance directly
   const handleDecrypt = async () => {
-    if (!countHandle || !window.ethereum || !contractAddress || contractAddress === 'Not supported chain') return;
+    if (!countHandle || !walletProvider || !contractAddress || contractAddress === 'Not supported chain') return;
     
     try {
       setIsDecrypting(true);
@@ -88,7 +86,7 @@ export default function FheCounter({ account, chainId, isConnected, isInitialize
       onMessage('Decrypting with EIP-712 user decryption...');
       
       // Get signer for EIP-712 signature
-      const provider = new ethers.BrowserProvider(window.ethereum);
+      const provider = new ethers.BrowserProvider(walletProvider);
       const signer = await provider.getSigner();
       
       // Use decryptValue from fhevmInstance
@@ -107,13 +105,13 @@ export default function FheCounter({ account, chainId, isConnected, isInitialize
 
   // Increment counter using the adapter hooks
   const incrementCounter = async () => {
-    if (!isConnected || !contractAddress || !window.ethereum) return;
+    if (!isConnected || !contractAddress || !walletProvider || !address) return;
     
     try {
       setIsProcessing(true);
       onMessage('Starting increment transaction...');
       
-      const provider = new ethers.BrowserProvider(window.ethereum);
+      const provider = new ethers.BrowserProvider(walletProvider);
       const signer = await provider.getSigner();
       const contract = new ethers.Contract(contractAddress, CONTRACT_ABI, signer);
       
@@ -122,7 +120,7 @@ export default function FheCounter({ account, chainId, isConnected, isInitialize
       setEncryptError('');
       try {
         // Use createEncryptedInput from fhevmInstance
-        const encryptedResult = await createEncryptedInput(contractAddress, account, 1);
+        const encryptedResult = await createEncryptedInput(contractAddress, address, 1);
         
         // Handle the encrypted data structure properly
         let encryptedData: any, proof: any;
@@ -176,13 +174,13 @@ export default function FheCounter({ account, chainId, isConnected, isInitialize
 
   // Decrement counter using the adapter hooks
   const decrementCounter = async () => {
-    if (!isConnected || !contractAddress || !window.ethereum) return;
+    if (!isConnected || !contractAddress || !walletProvider || !address) return;
     
     try {
       setIsProcessing(true);
       onMessage('Starting decrement transaction...');
       
-      const provider = new ethers.BrowserProvider(window.ethereum);
+      const provider = new ethers.BrowserProvider(walletProvider);
       const signer = await provider.getSigner();
       const contract = new ethers.Contract(contractAddress, CONTRACT_ABI, signer);
       
@@ -191,7 +189,7 @@ export default function FheCounter({ account, chainId, isConnected, isInitialize
       setEncryptError('');
       try {
         // Use createEncryptedInput from fhevmInstance
-        const encryptedResult = await createEncryptedInput(contractAddress, account, 1);
+        const encryptedResult = await createEncryptedInput(contractAddress, address, 1);
         
         // Handle the encrypted data structure properly
         let encryptedData: any, proof: any;
@@ -352,4 +350,3 @@ export default function FheCounter({ account, chainId, isConnected, isInitialize
     </div>
   );
 }
-

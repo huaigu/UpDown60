@@ -18,8 +18,10 @@ const PUBLIC_RPC_URL = 'https://ethereum-sepolia-rpc.publicnode.com';
 const LOCAL_FEED_KEY = 'btcUpDownLiveFeedV2';
 const LOCAL_FEED_BLOCK_KEY = 'btcUpDownLiveFeedLastBlockV2';
 const LOCAL_DEPLOY_BLOCK_KEY = 'btcUpDownDeployBlockV2';
+const LOCAL_FEED_FULL_SYNC_KEY = 'btcUpDownLiveFeedFullSyncV2';
+const LOCAL_FEED_CURSOR_KEY = 'btcUpDownLiveFeedCursorV2';
 const SEPOLIA_DEPLOY_BLOCK = 9922892;
-const FEED_EVENTS_LIMIT = 60;
+const FULL_SYNC_BLOCK_CHUNK = 5000;
 
 const CONTRACT_ABI = [
   'event BetPlaced(uint256 indexed roundId, address indexed user, uint64 stake)',
@@ -83,8 +85,7 @@ const mergeFeedEvents = (prev: FeedEvent[], incoming: FeedEvent[]) => {
         return b.blockNumber - a.blockNumber;
       }
       return b.logIndex - a.logIndex;
-    })
-    .slice(0, FEED_EVENTS_LIMIT);
+    });
 };
 
 const getEventLogIndex = (event: { logIndex?: number; index?: number }) =>
@@ -97,6 +98,8 @@ const normalizedContract = CONTRACT_ADDRESS.toLowerCase();
 const feedStorageKey = `${LOCAL_FEED_KEY}:${SEPOLIA_CHAIN_ID}:${normalizedContract}`;
 const feedBlockKey = `${feedStorageKey}:${LOCAL_FEED_BLOCK_KEY}`;
 const deployBlockKey = `${LOCAL_DEPLOY_BLOCK_KEY}:${SEPOLIA_CHAIN_ID}:${normalizedContract}`;
+const feedFullSyncKey = `${LOCAL_FEED_FULL_SYNC_KEY}:${SEPOLIA_CHAIN_ID}:${normalizedContract}`;
+const feedCursorKey = `${LOCAL_FEED_CURSOR_KEY}:${SEPOLIA_CHAIN_ID}:${normalizedContract}`;
 
 export function LiveFeedProvider({ children }: { children: ReactNode }) {
   const [feedEvents, setFeedEvents] = useState<FeedEvent[]>([]);
@@ -104,6 +107,8 @@ export function LiveFeedProvider({ children }: { children: ReactNode }) {
   const [feedSyncStatus, setFeedSyncStatus] = useState('');
   const [feedSyncProgress, setFeedSyncProgress] = useState<number | null>(null);
   const [feedSyncError, setFeedSyncError] = useState('');
+  const [needsFullSync, setNeedsFullSync] = useState(true);
+  const [fullSyncCursor, setFullSyncCursor] = useState<number | null>(null);
   const provider = useMemo(() => new ethers.JsonRpcProvider(PUBLIC_RPC_URL), []);
   const hasLoadedRef = useRef(false);
 
@@ -128,6 +133,18 @@ export function LiveFeedProvider({ children }: { children: ReactNode }) {
     } else {
       setLastIndexedBlock(null);
     }
+    const storedCursor = window.localStorage.getItem(feedCursorKey);
+    const storedFullSync = window.localStorage.getItem(feedFullSyncKey);
+    const hasFullSync = storedFullSync === 'true';
+    setNeedsFullSync(!hasFullSync);
+    if (hasFullSync) {
+      setFullSyncCursor(null);
+    } else if (storedCursor) {
+      const parsedCursor = Number(storedCursor);
+      setFullSyncCursor(Number.isNaN(parsedCursor) ? SEPOLIA_DEPLOY_BLOCK : parsedCursor);
+    } else {
+      setFullSyncCursor(SEPOLIA_DEPLOY_BLOCK);
+    }
     hasLoadedRef.current = true;
   }, []);
 
@@ -138,14 +155,22 @@ export function LiveFeedProvider({ children }: { children: ReactNode }) {
     if (storedNumber && storedNumber !== SEPOLIA_DEPLOY_BLOCK) {
       window.localStorage.removeItem(feedBlockKey);
       window.localStorage.removeItem(feedStorageKey);
+      window.localStorage.removeItem(feedFullSyncKey);
+      window.localStorage.removeItem(feedCursorKey);
       setFeedEvents([]);
       setLastIndexedBlock(null);
+      setNeedsFullSync(true);
+      setFullSyncCursor(SEPOLIA_DEPLOY_BLOCK);
     }
     if (!storedDeploy && lastIndexedBlock !== null) {
       window.localStorage.removeItem(feedBlockKey);
       window.localStorage.removeItem(feedStorageKey);
+      window.localStorage.removeItem(feedFullSyncKey);
+      window.localStorage.removeItem(feedCursorKey);
       setFeedEvents([]);
       setLastIndexedBlock(null);
+      setNeedsFullSync(true);
+      setFullSyncCursor(SEPOLIA_DEPLOY_BLOCK);
     }
     window.localStorage.setItem(deployBlockKey, String(SEPOLIA_DEPLOY_BLOCK));
   }, [lastIndexedBlock]);
@@ -157,6 +182,13 @@ export function LiveFeedProvider({ children }: { children: ReactNode }) {
       window.localStorage.setItem(feedBlockKey, String(lastIndexedBlock));
     }
   }, [feedEvents, lastIndexedBlock]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !hasLoadedRef.current) return;
+    if (needsFullSync && fullSyncCursor !== null) {
+      window.localStorage.setItem(feedCursorKey, String(fullSyncCursor));
+    }
+  }, [fullSyncCursor, needsFullSync]);
 
   const addFeedEvents = useCallback(
     (incoming: FeedEvent[], blockNumber?: number | null) => {
@@ -184,14 +216,18 @@ export function LiveFeedProvider({ children }: { children: ReactNode }) {
 
     const syncFeed = async () => {
       try {
-        if (lastIndexedBlock === null) {
+        const shouldFullSync = needsFullSync || lastIndexedBlock === null;
+        if (shouldFullSync) {
           setFeedSyncStatus('Syncing history from deployment...');
           setFeedSyncProgress(null);
           setFeedSyncError('');
         }
         const latestBlock = await provider.getBlockNumber();
-        const fromBlock =
-          lastIndexedBlock !== null
+        const fromBlock = shouldFullSync
+          ? SEPOLIA_DEPLOY_BLOCK <= latestBlock
+            ? fullSyncCursor ?? SEPOLIA_DEPLOY_BLOCK
+            : null
+          : lastIndexedBlock !== null
             ? Math.max(lastIndexedBlock - 50, 0)
             : SEPOLIA_DEPLOY_BLOCK <= latestBlock
               ? SEPOLIA_DEPLOY_BLOCK
@@ -200,19 +236,27 @@ export function LiveFeedProvider({ children }: { children: ReactNode }) {
           setFeedSyncError('Feed sync paused (deployment block unavailable).');
           return;
         }
-        if (lastIndexedBlock === null && latestBlock > fromBlock) {
+        const toBlock = shouldFullSync
+          ? Math.min(fromBlock + FULL_SYNC_BLOCK_CHUNK, latestBlock)
+          : latestBlock;
+        if (shouldFullSync && latestBlock >= SEPOLIA_DEPLOY_BLOCK) {
           const progress = Math.min(
             100,
-            Math.round(((latestBlock - fromBlock) / Math.max(latestBlock, 1)) * 100)
+            Math.round(
+              ((Math.min(toBlock, latestBlock) - SEPOLIA_DEPLOY_BLOCK) /
+                Math.max(latestBlock - SEPOLIA_DEPLOY_BLOCK, 1)) *
+                100
+            )
           );
           setFeedSyncProgress(progress);
+          setFeedSyncStatus(`Syncing history ${fromBlock}→${toBlock}`);
         }
         if (fromBlock > latestBlock) return;
         const [betEvents, claimEvents, initEvents, finalizeEvents] = await Promise.all([
-          contract.queryFilter(contract.filters.BetPlaced(), fromBlock, latestBlock),
-          contract.queryFilter(contract.filters.ClaimPaid(), fromBlock, latestBlock),
-          contract.queryFilter(contract.filters.RoundInitialized(), fromBlock, latestBlock),
-          contract.queryFilter(contract.filters.RoundFinalized(), fromBlock, latestBlock),
+          contract.queryFilter(contract.filters.BetPlaced(), fromBlock, toBlock),
+          contract.queryFilter(contract.filters.ClaimPaid(), fromBlock, toBlock),
+          contract.queryFilter(contract.filters.RoundInitialized(), fromBlock, toBlock),
+          contract.queryFilter(contract.filters.RoundFinalized(), fromBlock, toBlock),
         ]);
         if (!isActive) return;
         const mapped: FeedEvent[] = [
@@ -277,10 +321,23 @@ export function LiveFeedProvider({ children }: { children: ReactNode }) {
         if (mapped.length) {
           setFeedEvents((prev) => mergeFeedEvents(prev, mapped));
         }
-        setLastIndexedBlock(latestBlock);
-        if (lastIndexedBlock === null) {
-          setFeedSyncStatus('');
-          setFeedSyncProgress(null);
+        setLastIndexedBlock((prev) =>
+          prev === null ? toBlock : Math.max(prev, toBlock)
+        );
+        if (shouldFullSync) {
+          if (toBlock >= latestBlock) {
+            setFeedSyncStatus('');
+            setFeedSyncProgress(null);
+            setNeedsFullSync(false);
+            setFullSyncCursor(null);
+            if (typeof window !== 'undefined') {
+              window.localStorage.setItem(feedFullSyncKey, 'true');
+              window.localStorage.removeItem(feedCursorKey);
+            }
+            setLastIndexedBlock(latestBlock);
+          } else {
+            setFullSyncCursor(toBlock + 1);
+          }
         }
         setFeedSyncError('');
       } catch (err) {
@@ -297,7 +354,7 @@ export function LiveFeedProvider({ children }: { children: ReactNode }) {
       isActive = false;
       window.clearInterval(interval);
     };
-  }, [provider, lastIndexedBlock]);
+  }, [provider, lastIndexedBlock, needsFullSync, fullSyncCursor]);
 
   const value = useMemo<LiveFeedContextValue>(
     () => ({

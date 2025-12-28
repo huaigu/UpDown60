@@ -1,6 +1,7 @@
 import type { Metadata } from 'next'
 import Script from 'next/script'
 import { FhevmProvider } from './providers/FhevmProvider'
+import { ReownProvider } from './providers/ReownProvider'
 import { LiveFeedProvider } from './providers/LiveFeedProvider'
 import './globals.css'
 
@@ -24,9 +25,11 @@ export default function RootLayout({
           src="https://cdn.zama.org/relayer-sdk-js/0.3.0-5/relayer-sdk-js.umd.cjs"
           strategy="beforeInteractive"
         />
-        <FhevmProvider>
-          <LiveFeedProvider>{children}</LiveFeedProvider>
-        </FhevmProvider>
+        <ReownProvider>
+          <FhevmProvider>
+            <LiveFeedProvider>{children}</LiveFeedProvider>
+          </FhevmProvider>
+        </ReownProvider>
       </body>
     </html>
   )

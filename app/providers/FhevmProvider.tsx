@@ -1,6 +1,14 @@
 'use client';
 
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useMemo, useState } from 'react';
+import type { Eip1193Provider } from 'ethers';
+import {
+  useAppKit,
+  useAppKitAccount,
+  useAppKitNetwork,
+  useAppKitProvider,
+  useDisconnect,
+} from '@reown/appkit/react';
 import { initializeFheInstance, createEncryptedInput, decryptValue } from '../../src/lib/fhevmInstance';
 
 // Create a comprehensive context that includes all wagmi-like hooks
@@ -12,7 +20,8 @@ interface FhevmContextType {
   isConnecting: boolean;
   walletError: string;
   connect: () => Promise<void>;
-  disconnect: () => void;
+  disconnect: () => Promise<void>;
+  walletProvider?: Eip1193Provider;
   
   // FHEVM
   fheInstance: any;
@@ -36,53 +45,58 @@ interface FhevmContextType {
 const FhevmContext = createContext<FhevmContextType | undefined>(undefined);
 
 export function FhevmProvider({ children }: { children: React.ReactNode }) {
-  const [address, setAddress] = useState<string>('');
-  const [isConnected, setIsConnected] = useState<boolean>(false);
-  const [chainId, setChainId] = useState<number>(0);
-  const [isConnecting, setIsConnecting] = useState<boolean>(false);
+  const { open } = useAppKit();
+  const { disconnect: disconnectAppKit } = useDisconnect();
+  const { address, isConnected, status } = useAppKitAccount({ namespace: 'eip155' });
+  const { chainId: appKitChainId } = useAppKitNetwork();
+  const { walletProvider } = useAppKitProvider<Eip1193Provider>('eip155');
   const [walletError, setWalletError] = useState<string>('');
   const [fheInstance, setFheInstance] = useState<any>(null);
   const [isInitialized, setIsInitialized] = useState<boolean>(false);
   const [error, setError] = useState<string>('');
   const [isBusy, setIsBusy] = useState<boolean>(false);
   const [message, setMessage] = useState<string>('');
+  const chainId = useMemo(() => {
+    if (typeof appKitChainId === 'number') return appKitChainId;
+    if (typeof appKitChainId === 'string') {
+      const rawValue = appKitChainId.includes(':')
+        ? appKitChainId.split(':').pop() ?? ''
+        : appKitChainId;
+      const parsed = Number(rawValue);
+      return Number.isNaN(parsed) ? 0 : parsed;
+    }
+    return 0;
+  }, [appKitChainId]);
+  const isConnecting = status === 'connecting' || status === 'reconnecting';
 
   // Connect wallet
   const connect = async () => {
-    if (typeof window === 'undefined' || !window.ethereum) {
-      setWalletError('Please install MetaMask or connect a wallet');
-      return;
-    }
-
     try {
-      setIsConnecting(true);
-      const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
-      const chainId = await window.ethereum.request({ method: 'eth_chainId' });
-      
-      setAddress(accounts[0]);
-      setChainId(parseInt(chainId, 16));
-      setIsConnected(true);
       setWalletError('');
+      await open({ view: 'Connect', namespace: 'eip155' });
     } catch (err: any) {
-      setWalletError(err.message);
-    } finally {
-      setIsConnecting(false);
+      setWalletError(err?.message || 'Wallet connection failed');
     }
   };
 
   // Disconnect wallet
-  const disconnect = () => {
-    setAddress('');
-    setIsConnected(false);
-    setChainId(0);
-    setWalletError('');
+  const disconnect = async () => {
+    try {
+      await disconnectAppKit({ namespace: 'eip155' });
+      setWalletError('');
+    } catch (err: any) {
+      setWalletError(err?.message || 'Failed to disconnect wallet');
+    }
   };
 
   // Initialize FHEVM
   const initialize = async () => {
     try {
       setError('');
-      const instance = await initializeFheInstance();
+      if (!walletProvider) {
+        throw new Error('Wallet provider not found. Please connect a wallet.');
+      }
+      const instance = await initializeFheInstance(walletProvider);
       setFheInstance(instance);
       setIsInitialized(true);
     } catch (err: any) {
@@ -141,13 +155,14 @@ export function FhevmProvider({ children }: { children: React.ReactNode }) {
 
   const contextValue: FhevmContextType = {
     // Wallet
-    address,
+    address: address || '',
     isConnected,
     chainId,
     isConnecting,
     walletError,
     connect,
     disconnect,
+    walletProvider,
     
     // FHEVM
     fheInstance,
