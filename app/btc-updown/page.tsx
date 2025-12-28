@@ -1194,6 +1194,17 @@ export default function BtcUpDownPage() {
     };
   }, [blockTimestamp, blockFetchedAt, clientNow]);
   const displaySubmissions = localSubmissions.slice(0, 3);
+  const localDirectionLookup = useMemo(() => {
+    const map = new Map<string, LocalSubmission['direction']>();
+    localSubmissions.forEach((submission) => {
+      if (!submission.address) return;
+      map.set(
+        `${submission.roundId}:${normalizeAddress(submission.address)}`,
+        submission.direction
+      );
+    });
+    return map;
+  }, [localSubmissions]);
   const displayRoundId = currentRound ?? 9284;
   const displayTargetRoundId = targetRoundId ?? displayRoundId + 1;
   const isInitialSync = lastIndexedBlock === null;
@@ -1965,6 +1976,12 @@ export default function BtcUpDownPage() {
                         const activityItems = isActivityExpanded
                           ? group.activity
                           : group.activity.slice(0, 2);
+                        const claimUsers = new Set(
+                          group.activity
+                            .filter((item) => item.type === 'claim' && item.user)
+                            .map((item) => normalizeAddress(item.user))
+                            .filter(Boolean)
+                        );
                         return (
                         <div
                           className={`border-3 border-neo-black rounded-xl shadow-neo-sm ${
@@ -2069,22 +2086,40 @@ export default function BtcUpDownPage() {
                                     const hasFinal =
                                       finalResult === 1 || finalResult === 2 || finalResult === 3;
                                     const isTie = finalResult === 3;
+                                    const userKey = normalizeAddress(event.user);
+                                    const localDirection = userKey
+                                      ? localDirectionLookup.get(
+                                          `${group.roundId}:${userKey}`
+                                        )
+                                      : undefined;
+                                    const directionKnown =
+                                      localDirection === 'up' || localDirection === 'down';
+                                    const hasClaim = userKey ? claimUsers.has(userKey) : false;
                                     let actionLabel = event.type === 'bet' ? 'BET' : 'PENDING';
                                     let actionClass = 'bg-gray-200 text-neo-black';
-                                    if (hasFinal) {
-                                      if (isTie) {
-                                        actionLabel = 'TIE';
-                                        actionClass = 'bg-gray-300 text-neo-black';
-                                      } else if (event.type === 'claim') {
-                                        actionLabel = 'WIN';
-                                        actionClass = 'bg-[#0bda0b] text-white';
-                                      } else {
-                                        actionLabel = 'LOST';
-                                        actionClass = 'bg-[#ff3333] text-white';
-                                      }
-                                    } else if (event.type === 'claim') {
+                                    if (event.type === 'claim') {
                                       actionLabel = 'WIN';
                                       actionClass = 'bg-[#0bda0b] text-white';
+                                    } else if (event.type === 'bet') {
+                                      if (!hasFinal) {
+                                        actionLabel = 'BET';
+                                      } else if (isTie) {
+                                        actionLabel = 'TIE';
+                                        actionClass = 'bg-gray-300 text-neo-black';
+                                      } else if (hasClaim) {
+                                        actionLabel = 'WIN';
+                                        actionClass = 'bg-[#0bda0b] text-white';
+                                      } else if (directionKnown) {
+                                        const isWinner =
+                                          (finalResult === 1 && localDirection === 'up') ||
+                                          (finalResult === 2 && localDirection === 'down');
+                                        actionLabel = isWinner ? 'WIN' : 'LOST';
+                                        actionClass = isWinner
+                                          ? 'bg-[#0bda0b] text-white'
+                                          : 'bg-[#ff3333] text-white';
+                                      } else {
+                                        actionLabel = 'HIDDEN';
+                                      }
                                     }
                                     return (
                                       <div
