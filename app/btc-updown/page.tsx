@@ -65,6 +65,16 @@ const formatShortAddress = (value: string) => {
 };
 
 const normalizeAddress = (value?: string | null) => (value ? value.toLowerCase() : '');
+const isNewerFeedEvent = (candidate: FeedEvent, existing: FeedEvent) => {
+  if (candidate.blockNumber !== existing.blockNumber) {
+    return candidate.blockNumber > existing.blockNumber;
+  }
+  return candidate.logIndex > existing.logIndex;
+};
+const sortFeedEventsDesc = (a: FeedEvent, b: FeedEvent) => {
+  if (a.blockNumber !== b.blockNumber) return b.blockNumber - a.blockNumber;
+  return b.logIndex - a.logIndex;
+};
 
 const formatTxHash = (value?: string | null) => {
   if (!value) return '';
@@ -1970,18 +1980,42 @@ export default function BtcUpDownPage() {
                         ) : null}
                       </div>
                       {pagedRoundGroups.map((group, index) => {
-                        const isCompactRound = group.activity.length === 0;
-                        const hasMoreActivity = group.activity.length > 2;
+                        const mergedActivity = (() => {
+                          const byUser = new Map<string, FeedEvent>();
+                          const unkeyed: FeedEvent[] = [];
+                          group.activity.forEach((event) => {
+                            const userKey = normalizeAddress(event.user);
+                            if (!userKey) {
+                              unkeyed.push(event);
+                              return;
+                            }
+                            const existing = byUser.get(userKey);
+                            if (!existing) {
+                              byUser.set(userKey, event);
+                              return;
+                            }
+                            if (existing.type === 'claim') {
+                              if (event.type === 'claim' && isNewerFeedEvent(event, existing)) {
+                                byUser.set(userKey, event);
+                              }
+                              return;
+                            }
+                            if (event.type === 'claim') {
+                              byUser.set(userKey, event);
+                              return;
+                            }
+                            if (isNewerFeedEvent(event, existing)) {
+                              byUser.set(userKey, event);
+                            }
+                          });
+                          return [...byUser.values(), ...unkeyed].sort(sortFeedEventsDesc);
+                        })();
+                        const isCompactRound = mergedActivity.length === 0;
+                        const hasMoreActivity = mergedActivity.length > 2;
                         const isActivityExpanded = !!expandedActivityByRound[group.roundId];
                         const activityItems = isActivityExpanded
-                          ? group.activity
-                          : group.activity.slice(0, 2);
-                        const claimUsers = new Set(
-                          group.activity
-                            .filter((item) => item.type === 'claim' && item.user)
-                            .map((item) => normalizeAddress(item.user))
-                            .filter(Boolean)
-                        );
+                          ? mergedActivity
+                          : mergedActivity.slice(0, 2);
                         return (
                         <div
                           className={`border-3 border-neo-black rounded-xl shadow-neo-sm ${
@@ -2076,7 +2110,7 @@ export default function BtcUpDownPage() {
                                     >
                                       {isActivityExpanded
                                         ? 'Show less'
-                                        : `+${group.activity.length - 2} more`}
+                                        : `+${mergedActivity.length - 2} more`}
                                     </button>
                                   ) : null}
                                 </div>
@@ -2094,7 +2128,6 @@ export default function BtcUpDownPage() {
                                       : undefined;
                                     const directionKnown =
                                       localDirection === 'up' || localDirection === 'down';
-                                    const hasClaim = userKey ? claimUsers.has(userKey) : false;
                                     let actionLabel = event.type === 'bet' ? 'BET' : 'PENDING';
                                     let actionClass = 'bg-gray-200 text-neo-black';
                                     if (event.type === 'claim') {
@@ -2106,9 +2139,6 @@ export default function BtcUpDownPage() {
                                       } else if (isTie) {
                                         actionLabel = 'TIE';
                                         actionClass = 'bg-gray-300 text-neo-black';
-                                      } else if (hasClaim) {
-                                        actionLabel = 'WIN';
-                                        actionClass = 'bg-[#0bda0b] text-white';
                                       } else if (directionKnown) {
                                         const isWinner =
                                           (finalResult === 1 && localDirection === 'up') ||
