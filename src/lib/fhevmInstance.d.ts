@@ -17,5 +17,5 @@ export declare function createEncryptedInput(contractAddress: string, userAddres
 export declare function publicDecrypt(encryptedData: string): Promise<number>;
 export declare function decryptMultipleHandles(contractAddress: string, signer: any, handles: string[]): Promise<DecryptMultipleResult>;
 export declare function fetchPublicDecryption(handles: string[]): Promise<any>;
-export declare function initializeFheInstance(): Promise<any>;
+export declare function initializeFheInstance(walletProvider: any): Promise<any>;
 export declare function getFheInstance(): any;

@@ -10,9 +10,12 @@ let fheInstance = null;
  * Initialize FHEVM instance
  * Uses CDN for browser environments to avoid bundling issues
  */
-export async function initializeFheInstance() {
-    if (typeof window === 'undefined' || !window.ethereum) {
-        throw new Error('Ethereum provider not found. Please install MetaMask or connect a wallet.');
+export async function initializeFheInstance(walletProvider) {
+    if (typeof window === 'undefined') {
+        throw new Error('Wallet provider not found. Please connect a wallet.');
+    }
+    if (!walletProvider) {
+        throw new Error('Wallet provider not found. Please connect a wallet.');
     }
     
     // Check for both uppercase and lowercase versions of RelayerSDK
@@ -24,7 +27,7 @@ export async function initializeFheInstance() {
     const { initSDK, createInstance, SepoliaConfig } = sdk;
     await initSDK(); // Loads WASM
     
-    const config = { ...SepoliaConfig, network: window.ethereum };
+    const config = { ...SepoliaConfig, network: walletProvider };
     
     try {
         fheInstance = await createInstance(config);

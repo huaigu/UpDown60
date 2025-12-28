@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { ethers } from 'ethers';
 import { createEncryptedInput, publicDecrypt } from '../src/lib/fhevmInstance';
+import { useFhevm } from '../app/providers/FhevmProvider';
 
 // Contract configuration
 const RATINGS_CONTRACT_ADDRESS = '0xf80A030984a0AB6111B6e60973A6c16C668ede7a'; // Sepolia - Updated for 0.9.1
@@ -156,14 +157,11 @@ interface Card {
 }
 
 interface FheRatingsProps {
-  account: string;
-  chainId: number;
-  isConnected: boolean;
-  isInitialized: boolean;
   onMessage: (message: string) => void;
 }
 
-export default function FheRatings({ account, chainId, isConnected, isInitialized, onMessage }: FheRatingsProps) {
+export default function FheRatings({ onMessage }: FheRatingsProps) {
+  const { address, isConnected, isInitialized, walletProvider } = useFhevm();
   const [cards, setCards] = useState<Card[]>([]);
   const [totalCards, setTotalCards] = useState<number>(0);
   const [creationFee, setCreationFee] = useState<string>('0');
@@ -189,10 +187,10 @@ export default function FheRatings({ account, chainId, isConnected, isInitialize
 
   // Load contract data
   const loadContractData = async () => {
-    if (!isConnected || !window.ethereum) return;
+    if (!isConnected || !walletProvider) return;
 
     try {
-      const provider = new ethers.BrowserProvider(window.ethereum);
+      const provider = new ethers.BrowserProvider(walletProvider);
       const contract = new ethers.Contract(RATINGS_CONTRACT_ADDRESS, RATINGS_CONTRACT_ABI, provider);
       
       const [totalCardsResult, creationFeeResult] = await Promise.all([
@@ -209,11 +207,11 @@ export default function FheRatings({ account, chainId, isConnected, isInitialize
 
   // Load cards from contract
   const loadCards = async () => {
-    if (!isConnected || !window.ethereum) return;
+    if (!isConnected || !walletProvider || !address) return;
 
     try {
       onMessage('Loading cards from contract...');
-      const provider = new ethers.BrowserProvider(window.ethereum);
+      const provider = new ethers.BrowserProvider(walletProvider);
       const contract = new ethers.Contract(RATINGS_CONTRACT_ADDRESS, RATINGS_CONTRACT_ABI, provider);
 
       const newCards: Card[] = [];
@@ -221,7 +219,7 @@ export default function FheRatings({ account, chainId, isConnected, isInitialize
       for (let i = 0; i < totalCards; i++) {
         try {
           const [createdAt, creator, exists] = await contract.getCardInfo(i);
-          const hasVoted = await contract.hasAddressVoted(i, account);
+          const hasVoted = await contract.hasAddressVoted(i, address);
           
           if (exists) {
             newCards.push({
@@ -248,13 +246,13 @@ export default function FheRatings({ account, chainId, isConnected, isInitialize
 
   // Create new review card
   const createCard = async () => {
-    if (!isConnected || !window.ethereum) return;
+    if (!isConnected || !walletProvider || !address) return;
 
     try {
       setIsCreating(true);
       onMessage('Creating new review card...');
       
-      const provider = new ethers.BrowserProvider(window.ethereum);
+      const provider = new ethers.BrowserProvider(walletProvider);
       const signer = await provider.getSigner();
       const contract = new ethers.Contract(RATINGS_CONTRACT_ADDRESS, RATINGS_CONTRACT_ABI, signer);
       
@@ -293,13 +291,13 @@ export default function FheRatings({ account, chainId, isConnected, isInitialize
 
   // Submit rating for a card
   const submitRating = async (cardId: number, rating: number) => {
-    if (!isConnected || !window.ethereum) return;
+    if (!isConnected || !walletProvider || !address) return;
 
     try {
       setIsRating(cardId);
       onMessage(`Submitting rating ${rating}/5 for card ${cardId}...`);
       
-      const provider = new ethers.BrowserProvider(window.ethereum);
+      const provider = new ethers.BrowserProvider(walletProvider);
       const signer = await provider.getSigner();
       const contract = new ethers.Contract(RATINGS_CONTRACT_ADDRESS, RATINGS_CONTRACT_ABI, signer);
       
@@ -308,7 +306,7 @@ export default function FheRatings({ account, chainId, isConnected, isInitialize
       setEncryptError('');
       try {
         // Use createEncryptedInput from fhevmInstance
-        const encryptedResult = await createEncryptedInput(RATINGS_CONTRACT_ADDRESS, account, rating);
+        const encryptedResult = await createEncryptedInput(RATINGS_CONTRACT_ADDRESS, address, rating);
         
         // Handle the encrypted data structure properly
         let encryptedData: any, proof: any;
@@ -376,13 +374,13 @@ export default function FheRatings({ account, chainId, isConnected, isInitialize
 
   // Decrypt stats for a card
   const decryptStats = async (cardId: number) => {
-    if (!isInitialized || !window.ethereum) return;
+    if (!isInitialized || !walletProvider) return;
 
     try {
       setIsDecrypting(cardId);
       onMessage(`Decrypting stats for card ${cardId}...`);
       
-      const provider = new ethers.BrowserProvider(window.ethereum);
+      const provider = new ethers.BrowserProvider(walletProvider);
       const contract = new ethers.Contract(RATINGS_CONTRACT_ADDRESS, RATINGS_CONTRACT_ABI, provider);
       
       const [sumBytes, countBytes] = await contract.getEncryptedStats(cardId);
@@ -624,4 +622,3 @@ export default function FheRatings({ account, chainId, isConnected, isInitialize
     </div>
   );
 }
-

@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ethers } from 'ethers';
+import { useAppKitNetwork } from '@reown/appkit/react';
+import { sepolia } from '@reown/appkit/networks';
 import {
   createEncryptedInput,
   decryptMultipleHandles,
@@ -45,27 +47,12 @@ const ROUND_SECONDS = 3600;
 const SEPOLIA_CHAIN_ID = 11155111;
 const PUBLIC_RPC_URL = 'https://ethereum-sepolia-rpc.publicnode.com';
 const BINANCE_BTC_PRICE_URL = 'https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT';
-const SEPOLIA_CONFIG = {
-  chainId: '0xaa36a7',
-  chainName: 'Sepolia',
-  nativeCurrency: {
-    name: 'Sepolia Ether',
-    symbol: 'ETH',
-    decimals: 18,
-  },
-  rpcUrls: [
-    'https://ethereum-sepolia.publicnode.com',
-    'https://rpc.sepolia.org',
-    'https://sepolia.drpc.org',
-    'https://sepolia.infura.io/v3/',
-  ],
-  blockExplorerUrls: ['https://sepolia.etherscan.io/'],
-};
 const STAKE_ETH = '0.01';
 const LOCAL_SUBMISSIONS_KEY = 'btcUpDownLocalSubmissionsV2';
 const LOCAL_CLAIM_META_KEY = 'btcUpDownClaimMetaV2';
 const LOCAL_LAST_ADDRESS_KEY = 'btcUpDownLastAddressV2';
 const SEPOLIA_TX_URL = 'https://sepolia.etherscan.io/tx/';
+const ROUND_TIMELINE_PAGE_SIZE = 6;
 
 const formatAddress = (value: string) => {
   if (!value) return '';
@@ -155,7 +142,9 @@ export default function BtcUpDownPage() {
     walletError,
     error,
     chainId,
+    walletProvider,
   } = useFhevm();
+  const { switchNetwork } = useAppKitNetwork();
   const {
     feedEvents,
     lastIndexedBlock,
@@ -192,6 +181,8 @@ export default function BtcUpDownPage() {
   const [directionDecryptErrorByRound, setDirectionDecryptErrorByRound] = useState<Record<number, string>>({});
   const [cachedAddress, setCachedAddress] = useState('');
   const [submissionsLoadedKey, setSubmissionsLoadedKey] = useState('');
+  const [roundTimelinePage, setRoundTimelinePage] = useState(0);
+  const [expandedActivityByRound, setExpandedActivityByRound] = useState<Record<number, boolean>>({});
   const [userStats, setUserStats] = useState<{
     totalBets: number;
     totalWins: number;
@@ -206,14 +197,21 @@ export default function BtcUpDownPage() {
   const [blockTimestamp, setBlockTimestamp] = useState<number | null>(null);
   const [blockFetchedAt, setBlockFetchedAt] = useState<number | null>(null);
   const [clientNow, setClientNow] = useState(0);
+  const [isHydrated, setIsHydrated] = useState(false);
   const isOnSepolia = chainId === SEPOLIA_CHAIN_ID;
+  const displayAddress = isHydrated ? address : '';
+  const displayIsConnected = isHydrated ? isConnected : false;
+  const displayIsConnecting = isHydrated ? isConnecting : false;
+  const displayIsInitialized = isHydrated ? isInitialized : false;
+  const displayChainId = isHydrated ? chainId : 0;
+  const displayIsOnSepolia = displayChainId === SEPOLIA_CHAIN_ID;
   const publicProvider = useMemo(() => new ethers.JsonRpcProvider(PUBLIC_RPC_URL), []);
   const readProvider = useMemo(() => {
-    if (isConnected && isOnSepolia && typeof window !== 'undefined' && window.ethereum) {
-      return new ethers.BrowserProvider(window.ethereum);
+    if (isConnected && isOnSepolia && walletProvider) {
+      return new ethers.BrowserProvider(walletProvider);
     }
     return publicProvider;
-  }, [isConnected, isOnSepolia, publicProvider]);
+  }, [isConnected, isOnSepolia, publicProvider, walletProvider]);
   const lastAddressKey = useMemo(() => {
     if (!readContractAddress || readContractAddress === ethers.ZeroAddress) return '';
     return `${LOCAL_LAST_ADDRESS_KEY}:${readChainId}:${readContractAddress.toLowerCase()}`;
@@ -612,6 +610,10 @@ export default function BtcUpDownPage() {
   }, [isConnected, isInitialized, isInitializing, initialize, isOnSepolia]);
 
   useEffect(() => {
+    setIsHydrated(true);
+  }, []);
+
+  useEffect(() => {
     let isActive = true;
     const loadBtcPrice = async () => {
       try {
@@ -764,30 +766,21 @@ export default function BtcUpDownPage() {
   }, [hasReadContract]);
 
   const ensureSepolia = async () => {
-    if (!window.ethereum) {
+    if (!walletProvider) {
       throw new Error('No wallet found');
     }
-    const chainIdHex = await window.ethereum.request({ method: 'eth_chainId' });
-    if (parseInt(chainIdHex, 16) === SEPOLIA_CHAIN_ID) {
+    if (chainId === SEPOLIA_CHAIN_ID) {
       return;
     }
-    try {
-      await window.ethereum.request({
-        method: 'wallet_switchEthereumChain',
-        params: [{ chainId: SEPOLIA_CONFIG.chainId }],
-      });
-    } catch (switchError: any) {
-      if (switchError?.code !== 4902) {
-        throw switchError;
-      }
-      await window.ethereum.request({
-        method: 'wallet_addEthereumChain',
-        params: [SEPOLIA_CONFIG],
-      });
-    }
+    await switchNetwork(sepolia);
   };
 
-  const getProvider = () => new ethers.BrowserProvider(window.ethereum!);
+  const getProvider = () => {
+    if (!walletProvider) {
+      throw new Error('No wallet found');
+    }
+    return new ethers.BrowserProvider(walletProvider);
+  };
 
   const getReadContract = () => {
     return new ethers.Contract(readContractAddress, CONTRACT_ABI, readProvider);
@@ -849,20 +842,18 @@ export default function BtcUpDownPage() {
     if (betLoading || hasActiveBet) return;
     setBetLoading(true);
     try {
-      if (!window.ethereum) {
+      if (!walletProvider) {
         throw new Error('No wallet found');
       }
       if (!isConnected) {
         setBetLoadingText('Connecting wallet...');
         await handleConnect();
       }
-      const accounts = await window.ethereum.request({ method: 'eth_accounts' });
-      const userAddress = accounts?.[0];
+      const userAddress = address;
       if (!userAddress) {
         throw new Error('Wallet not connected');
       }
-      const chainIdHex = await window.ethereum.request({ method: 'eth_chainId' });
-      const connectedChainId = parseInt(chainIdHex, 16);
+      const connectedChainId = chainId;
       if (connectedChainId !== SEPOLIA_CHAIN_ID) {
         throw new Error('Switch to Sepolia to place a bet');
       }
@@ -921,20 +912,18 @@ export default function BtcUpDownPage() {
     setDirectionDecryptingRoundId(roundId);
     setDirectionDecryptStatusByRound((prev) => ({ ...prev, [roundId]: 'Preparing...' }));
     try {
-      if (!window.ethereum) {
+      if (!walletProvider) {
         throw new Error('No wallet found');
       }
       if (!isConnected) {
         setDirectionDecryptStatusByRound((prev) => ({ ...prev, [roundId]: 'Connecting wallet...' }));
         await handleConnect();
       }
-      const accounts = await window.ethereum.request({ method: 'eth_accounts' });
-      const userAddress = accounts?.[0];
+      const userAddress = address;
       if (!userAddress) {
         throw new Error('Wallet not connected');
       }
-      const chainIdHex = await window.ethereum.request({ method: 'eth_chainId' });
-      const connectedChainId = parseInt(chainIdHex, 16);
+      const connectedChainId = chainId;
       if (connectedChainId !== SEPOLIA_CHAIN_ID) {
         throw new Error('Switch to Sepolia to decrypt');
       }
@@ -978,20 +967,18 @@ export default function BtcUpDownPage() {
     setClaimingRoundId(roundId);
     setClaimStatusByRound((prev) => ({ ...prev, [roundId]: 'Preparing claim...' }));
     try {
-      if (!window.ethereum) {
+      if (!walletProvider) {
         throw new Error('No wallet found');
       }
       if (!isConnected) {
         setClaimStatusByRound((prev) => ({ ...prev, [roundId]: 'Connecting wallet...' }));
         await handleConnect();
       }
-      const accounts = await window.ethereum.request({ method: 'eth_accounts' });
-      const userAddress = accounts?.[0];
+      const userAddress = address;
       if (!userAddress) {
         throw new Error('Wallet not connected');
       }
-      const chainIdHex = await window.ethereum.request({ method: 'eth_chainId' });
-      const connectedChainId = parseInt(chainIdHex, 16);
+      const connectedChainId = chainId;
       if (connectedChainId !== SEPOLIA_CHAIN_ID) {
         throw new Error('Switch to Sepolia to claim');
       }
@@ -1131,8 +1118,8 @@ export default function BtcUpDownPage() {
     setNetworkError('');
     try {
       setIsSwitchingNetwork(true);
-      await ensureSepolia();
       await connect();
+      await ensureSepolia();
     } catch (err: any) {
       setNetworkError(err?.message || 'Failed to switch network');
     } finally {
@@ -1142,26 +1129,27 @@ export default function BtcUpDownPage() {
 
   const connectLabel = isSwitchingNetwork
     ? 'Switching...'
-    : isConnected
-      ? isInitialized
+    : displayIsConnected
+      ? displayIsInitialized
         ? 'Connected'
         : 'Initializing...'
-      : isConnecting
+      : displayIsConnecting
         ? 'Connecting...'
         : 'Connect';
-  const connectSubLabel = isConnected && address ? formatShortAddress(address) : '';
+  const connectSubLabel =
+    displayIsConnected && displayAddress ? formatShortAddress(displayAddress) : '';
 
   const statusHint =
     walletError ||
     error ||
     networkError ||
-    (address
-      ? isOnSepolia
-        ? `Wallet: ${address}`
+    (displayAddress
+      ? displayIsOnSepolia
+        ? `Wallet: ${displayAddress}`
         : 'Switch to Sepolia'
-      : isInitialized
+      : displayIsInitialized
         ? 'FHEVM ready'
-        : isConnected
+        : displayIsConnected
           ? 'Initializing FHEVM...'
           : 'Connect wallet');
   const odds = useMemo(() => {
@@ -1216,7 +1204,7 @@ export default function BtcUpDownPage() {
         : isInitialSync
         ? feedSyncStatus || 'Syncing history from deployment...'
         : `Live. Synced to block #${lastIndexedBlock ?? '--'}. Round events, bets, and claims appear here.`;
-  const displayRoundGroups = useMemo(() => {
+  const roundGroups = useMemo(() => {
     const byRound = new Map<
       number,
       {
@@ -1277,10 +1265,24 @@ export default function BtcUpDownPage() {
         if (a.roundId !== b.roundId) return b.roundId - a.roundId;
         if (a.lastBlock !== b.lastBlock) return b.lastBlock - a.lastBlock;
         return b.lastLogIndex - a.lastLogIndex;
-      })
-      .slice(0, 6);
+      });
   }, [feedEvents]);
-  const hasFeedContent = displayRoundGroups.length > 0;
+  const totalRoundPages = Math.ceil(roundGroups.length / ROUND_TIMELINE_PAGE_SIZE);
+  const activeRoundPage = Math.min(
+    roundTimelinePage,
+    Math.max(totalRoundPages - 1, 0)
+  );
+  const pagedRoundGroups = roundGroups.slice(
+    activeRoundPage * ROUND_TIMELINE_PAGE_SIZE,
+    activeRoundPage * ROUND_TIMELINE_PAGE_SIZE + ROUND_TIMELINE_PAGE_SIZE
+  );
+  const showTimelinePagination = totalRoundPages > 1;
+  const hasFeedContent = roundGroups.length > 0;
+  useEffect(() => {
+    if (roundTimelinePage !== activeRoundPage) {
+      setRoundTimelinePage(activeRoundPage);
+    }
+  }, [roundTimelinePage, activeRoundPage]);
   const roundResultId = currentRound && currentRound > 0 ? currentRound - 1 : null;
   const getFeedUserLabel = (event: FeedEvent) => {
     if (event.type === 'bet' || event.type === 'claim') {
@@ -1365,7 +1367,7 @@ export default function BtcUpDownPage() {
         : netProfitValue < BigInt(0)
           ? 'text-[#ff3333]'
           : 'text-neo-black';
-  const canBet = isConnected && isOnSepolia && isInitialized && hasContract;
+  const canBet = displayIsConnected && displayIsOnSepolia && displayIsInitialized && hasContract;
   const betDisabled = betLoading || !canBet || hasActiveBet;
   const betHint =
     actionError ||
@@ -1912,13 +1914,57 @@ export default function BtcUpDownPage() {
                 <div className="p-4 text-center text-sm text-neo-black/60">{feedHint}</div>
               ) : (
                 <div className="p-4 flex flex-col gap-6">
-                  {displayRoundGroups.length ? (
+                  {roundGroups.length ? (
                     <div className="flex flex-col gap-3">
-                      <span className="text-xs font-display uppercase text-neo-black/60">
-                        Round Timeline
-                      </span>
-                      {displayRoundGroups.map((group, index) => {
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-xs font-display uppercase text-neo-black/60">
+                          Round Timeline
+                        </span>
+                        {showTimelinePagination ? (
+                          <div className="flex items-center gap-2 text-[10px] font-display uppercase text-neo-black/60">
+                            <button
+                              className={`border-2 border-neo-black px-2 py-1 shadow-neo-sm ${
+                                activeRoundPage === 0
+                                  ? 'bg-gray-200 text-neo-black/50 cursor-not-allowed'
+                                  : 'bg-white text-neo-black hover:translate-x-[1px] hover:translate-y-[1px] hover:shadow-none'
+                              }`}
+                              disabled={activeRoundPage === 0}
+                              onClick={() =>
+                                setRoundTimelinePage((prev) => Math.max(prev - 1, 0))
+                              }
+                              type="button"
+                            >
+                              Prev
+                            </button>
+                            <span>
+                              Page {activeRoundPage + 1}/{totalRoundPages}
+                            </span>
+                            <button
+                              className={`border-2 border-neo-black px-2 py-1 shadow-neo-sm ${
+                                activeRoundPage >= totalRoundPages - 1
+                                  ? 'bg-gray-200 text-neo-black/50 cursor-not-allowed'
+                                  : 'bg-white text-neo-black hover:translate-x-[1px] hover:translate-y-[1px] hover:shadow-none'
+                              }`}
+                              disabled={activeRoundPage >= totalRoundPages - 1}
+                              onClick={() =>
+                                setRoundTimelinePage((prev) =>
+                                  Math.min(prev + 1, totalRoundPages - 1)
+                                )
+                              }
+                              type="button"
+                            >
+                              Next
+                            </button>
+                          </div>
+                        ) : null}
+                      </div>
+                      {pagedRoundGroups.map((group, index) => {
                         const isCompactRound = group.activity.length === 0;
+                        const hasMoreActivity = group.activity.length > 2;
+                        const isActivityExpanded = !!expandedActivityByRound[group.roundId];
+                        const activityItems = isActivityExpanded
+                          ? group.activity
+                          : group.activity.slice(0, 2);
                         return (
                         <div
                           className={`border-3 border-neo-black rounded-xl shadow-neo-sm ${
@@ -1934,12 +1980,12 @@ export default function BtcUpDownPage() {
                               <span
                                 className={`${getRoundResultClass(
                                   group.final.result
-                                )} px-3 py-1 border-2 border-neo-black text-xs font-display uppercase shadow-neo-sm`}
+                                )} px-3 py-1 border border-neo-black/60 text-xs font-display uppercase rounded-sm min-w-[88px] inline-flex justify-center`}
                               >
                                 {getRoundResultLabel(group.final.result)}
                               </span>
                             ) : (
-                              <span className="bg-white text-neo-black px-3 py-1 border-2 border-neo-black text-xs font-display uppercase shadow-neo-sm">
+                              <span className="bg-white text-neo-black px-3 py-1 border border-neo-black/60 text-xs font-display uppercase rounded-sm min-w-[88px] inline-flex justify-center">
                                 Pending
                               </span>
                             )}
@@ -2000,14 +2046,25 @@ export default function BtcUpDownPage() {
                                       Activity
                                     </span>
                                   </div>
-                                  {group.activity.length > 2 ? (
-                                    <span className="text-[10px] font-display uppercase text-neo-black/60">
-                                      +{group.activity.length - 2} more
-                                    </span>
+                                  {hasMoreActivity ? (
+                                    <button
+                                      className="text-[10px] font-display uppercase text-neo-black/60 border-2 border-neo-black px-2 py-1 shadow-neo-sm bg-gray-100 hover:translate-x-[1px] hover:translate-y-[1px] hover:shadow-none transition-all"
+                                      type="button"
+                                      onClick={() =>
+                                        setExpandedActivityByRound((prev) => ({
+                                          ...prev,
+                                          [group.roundId]: !prev[group.roundId],
+                                        }))
+                                      }
+                                    >
+                                      {isActivityExpanded
+                                        ? 'Show less'
+                                        : `+${group.activity.length - 2} more`}
+                                    </button>
                                   ) : null}
                                 </div>
                                 <div className="mt-2 flex flex-col gap-2">
-                                  {group.activity.slice(0, 2).map((event) => {
+                                  {activityItems.map((event) => {
                                     const finalResult = group.final?.result;
                                     const hasFinal =
                                       finalResult === 1 || finalResult === 2 || finalResult === 3;
@@ -2041,7 +2098,7 @@ export default function BtcUpDownPage() {
                                           {formatEthValue(event.amountEth || '0')} ETH
                                         </span>
                                         <span
-                                          className={`${actionClass} text-[10px] font-display px-2 py-1 border-2 border-neo-black uppercase shadow-neo-sm w-[72px] inline-flex justify-center`}
+                                          className={`${actionClass} text-[10px] font-display px-2 py-1 border border-neo-black/60 uppercase rounded-sm w-[72px] inline-flex justify-center`}
                                         >
                                           {actionLabel}
                                         </span>
@@ -2115,8 +2172,8 @@ export default function BtcUpDownPage() {
 }
 
 function LegacyBtcUpDownPage() {
-  const [account, setAccount] = useState('');
-  const [chainId, setChainId] = useState<number | null>(null);
+  const { address, chainId, connect, walletProvider, isConnected } = useFhevm();
+  const activeChainId = chainId || null;
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [isInitialized, setIsInitialized] = useState(false);
@@ -2129,33 +2186,38 @@ function LegacyBtcUpDownPage() {
   const [pendingHandle, setPendingHandle] = useState<string>('');
 
   const contractAddress = useMemo(() => {
-    if (!chainId) return '';
-    return CONTRACT_ADDRESSES[chainId] || '';
-  }, [chainId]);
+    if (!activeChainId) return '';
+    return CONTRACT_ADDRESSES[activeChainId] || '';
+  }, [activeChainId]);
 
-  const ready = !!account && !!contractAddress && isInitialized;
+  const ready = !!address && !!contractAddress && isInitialized;
+
+  useEffect(() => {
+    if (!isConnected || !walletProvider || isInitialized) return;
+    initializeFheInstance(walletProvider)
+      .then(() => setIsInitialized(true))
+      .catch((err: any) => {
+        setError(err?.message || 'FHEVM initialization failed');
+      });
+  }, [isConnected, walletProvider, isInitialized]);
 
   const connectWallet = async () => {
     setError('');
     setMessage('');
-    if (!window.ethereum) {
-      setError('No wallet found');
-      return;
-    }
     try {
-      const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
-      const chainIdHex = await window.ethereum.request({ method: 'eth_chainId' });
-      setAccount(accounts[0]);
-      setChainId(parseInt(chainIdHex, 16));
+      await connect();
       setMessage('Wallet connected');
-      await initializeFheInstance();
-      setIsInitialized(true);
     } catch (err: any) {
       setError(err?.message || 'Wallet connection failed');
     }
   };
 
-  const getProvider = () => new ethers.BrowserProvider(window.ethereum!);
+  const getProvider = () => {
+    if (!walletProvider) {
+      throw new Error('No wallet found');
+    }
+    return new ethers.BrowserProvider(walletProvider);
+  };
 
   const getContract = async (withSigner: boolean) => {
     const provider = getProvider();
@@ -2185,17 +2247,21 @@ function LegacyBtcUpDownPage() {
   };
 
   useEffect(() => {
-    if (contractAddress && account) {
+    if (contractAddress && address) {
       refreshRound();
     }
-  }, [contractAddress, account]);
+  }, [contractAddress, address]);
 
   const placeBet = async () => {
     if (!ready || roundId === null) return;
     setError('');
     setMessage('Encrypting direction...');
     try {
-      const encrypted = await createEncryptedInput(contractAddress, account, direction === 'up' ? 1 : 0);
+      const encrypted = await createEncryptedInput(
+        contractAddress,
+        address,
+        direction === 'up' ? 1 : 0
+      );
       let encryptedData: any = encrypted.encryptedData;
       let proof: any = encrypted.proof;
       if (encryptedData instanceof Uint8Array) {
@@ -2277,7 +2343,7 @@ function LegacyBtcUpDownPage() {
       const tx = await contract.requestClaim(roundId);
       await tx.wait();
       const readContract = await getContract(false);
-      const pending = await readContract.getPendingClaim(roundId, account);
+      const pending = await readContract.getPendingClaim(roundId, address);
       if (pending[0]) {
         setPendingHandle(pending[1]);
       }
@@ -2335,10 +2401,10 @@ function LegacyBtcUpDownPage() {
           Connect Wallet
         </button>
         <div className="text-sm text-gray-400">
-          {account ? `Account: ${account}` : 'Not connected'}
+          {address ? `Account: ${address}` : 'Not connected'}
         </div>
         <div className="text-sm text-gray-400">
-          {chainId ? `Chain ID: ${chainId}` : 'Chain ID: -'}
+          {activeChainId ? `Chain ID: ${activeChainId}` : 'Chain ID: -'}
         </div>
         <div className="text-sm text-gray-400">
           {contractAddress ? `Contract: ${contractAddress}` : 'Contract: not set'}

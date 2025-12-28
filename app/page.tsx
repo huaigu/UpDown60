@@ -1,8 +1,9 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { ethers } from 'ethers';
-import { FhevmProvider, useFhevm } from './providers/FhevmProvider';
+import { useAppKitNetwork } from '@reown/appkit/react';
+import { sepolia } from '@reown/appkit/networks';
+import { useFhevm } from './providers/FhevmProvider';
 import BtcUpDownPage from './btc-updown/page';
 import FheCounter from '../components/FheCounter';
 import FheRatings from '../components/FheRatings';
@@ -14,27 +15,12 @@ const CONTRACT_ADDRESSES = {
   11155111: '0x5F893Cf33715DbaC196229560418C709F0FFA6Ca', // Sepolia
 }
 
-// Sepolia network configuration
-const SEPOLIA_CONFIG = {
-  chainId: '0xaa36a7', // 11155111 in hex
-  chainName: 'Sepolia',
-  nativeCurrency: {
-    name: 'Sepolia Ether',
-    symbol: 'ETH',
-    decimals: 18,
-  },
-  rpcUrls: ['https://sepolia.infura.io/v3/'],
-  blockExplorerUrls: ['https://sepolia.etherscan.io/'],
-}
-
-
 // Window interface is already declared in types/ethereum.d.ts
 
 function HomePage() {
-  const { fheInstance, isInitialized, error, initialize } = useFhevm();
-  const [account, setAccount] = useState<string>('');
-  const [chainId, setChainId] = useState<number>(0);
-  const [isConnected, setIsConnected] = useState(false);
+  const { isInitialized, error, initialize, address, chainId, isConnected, connect, disconnect } =
+    useFhevm();
+  const { switchNetwork } = useAppKitNetwork();
   const [message, setMessage] = useState<string>('');
 
   const contractAddress = CONTRACT_ADDRESSES[chainId as keyof typeof CONTRACT_ADDRESSES] || 'Not supported chain';
@@ -54,91 +40,33 @@ function HomePage() {
 
   // Wallet connection
   const connectWallet = async () => {
-    console.log('🔗 Attempting to connect wallet...');
-    
-    if (typeof window === 'undefined') {
-      console.error('❌ Window is undefined - not in browser environment');
-      return;
-    }
-    
-    if (!window.ethereum) {
-      console.error('❌ No Ethereum provider found. Please install MetaMask or connect a wallet.');
-      alert('Please install MetaMask or connect a wallet to use this app.');
-      return;
-    }
-    
     try {
-      console.log('📱 Requesting accounts...');
-      const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
-      console.log('✅ Accounts received:', accounts);
-      
-      const chainIdHex = await window.ethereum.request({ method: 'eth_chainId' });
-      console.log('🔗 Chain ID:', chainIdHex);
-      
-      setAccount(accounts[0]);
-      setChainId(parseInt(chainIdHex, 16));
-      setIsConnected(true);
-      
-      console.log('✅ Wallet connected successfully!');
-    } catch (error) {
+      setMessage('Opening wallet...');
+      await connect();
+      setMessage('');
+    } catch (error: any) {
       console.error('❌ Wallet connection failed:', error);
-      alert(`Wallet connection failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      setMessage('');
+      alert(`Wallet connection failed: ${error?.message || 'Unknown error'}`);
     }
   };
 
   // Switch network to Sepolia
   const switchNetworkToSepolia = async () => {
-    if (!window.ethereum) {
-      setNetworkError('No Ethereum provider found');
-      return;
-    }
-
     try {
       setIsSwitchingNetwork(true);
       setNetworkError('');
       setMessage('Switching to Sepolia network...');
 
-      // Try to switch to Sepolia network
-      await window.ethereum.request({
-        method: 'wallet_switchEthereumChain',
-        params: [{ chainId: SEPOLIA_CONFIG.chainId }],
-      });
-
-      // Update chain ID after successful switch
-      const chainIdHex = await window.ethereum.request({ method: 'eth_chainId' });
-      setChainId(parseInt(chainIdHex, 16));
+      await switchNetwork(sepolia);
       setMessage('Successfully switched to Sepolia!');
       
       console.log('✅ Network switched to Sepolia');
       setTimeout(() => setMessage(''), 3000);
     } catch (error: any) {
       console.error('Network switch failed:', error);
-      
-      // If the chain doesn't exist, try to add it
-      if (error.code === 4902) {
-        try {
-          setMessage('Adding Sepolia network...');
-          await window.ethereum.request({
-            method: 'wallet_addEthereumChain',
-            params: [SEPOLIA_CONFIG],
-          });
-          
-          // Update chain ID after adding
-          const chainIdHex = await window.ethereum.request({ method: 'eth_chainId' });
-          setChainId(parseInt(chainIdHex, 16));
-          setMessage('Sepolia network added and switched!');
-          
-          console.log('✅ Sepolia network added and switched');
-          setTimeout(() => setMessage(''), 3000);
-        } catch (addError) {
-          console.error('Failed to add Sepolia network:', addError);
-          setNetworkError('Failed to add Sepolia network. Please add it manually in your wallet.');
-          setMessage('Failed to add Sepolia network');
-        }
-      } else {
-        setNetworkError(`Failed to switch network: ${error.message || 'Unknown error'}`);
-        setMessage('Failed to switch network');
-      }
+      setNetworkError(`Failed to switch network: ${error?.message || 'Unknown error'}`);
+      setMessage('Failed to switch network');
     } finally {
       setIsSwitchingNetwork(false);
     }
@@ -228,14 +156,15 @@ function HomePage() {
                   Connect
                 </button>
               ) : (
-                <button onClick={() => {
-                  setAccount('');
-                  setChainId(0);
-                  setIsConnected(false);
-                  setMessage('');
-                  setNetworkError('');
-                  setIsSwitchingNetwork(false);
-                }} className="btn-danger">
+                <button
+                  onClick={() => {
+                    disconnect();
+                    setMessage('');
+                    setNetworkError('');
+                    setIsSwitchingNetwork(false);
+                  }}
+                  className="btn-danger"
+                >
                   Disconnect
                 </button>
               )}
@@ -325,7 +254,7 @@ function HomePage() {
                 <div className="info-card">
                   <div className="flex flex-col gap-2">
                     <span className="text-gray-400 text-sm font-medium">Address</span>
-                    <span className="code-text text-[#FFEB3B]">{account}</span>
+                    <span className="code-text text-[#FFEB3B]">{address}</span>
                   </div>
                 </div>
                 <div className="info-card">
@@ -380,33 +309,15 @@ function HomePage() {
           </div>
 
           {isConnected && isInitialized && (
-            <FheVoting 
-              account={account}
-              chainId={chainId}
-              isConnected={isConnected}
-              isInitialized={isInitialized}
-              onMessage={setMessage}
-            />
+            <FheVoting onMessage={setMessage} />
           )}
         </div>
 
         {isConnected && isInitialized && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-            <FheCounter 
-              account={account}
-              chainId={chainId}
-              isConnected={isConnected}
-              isInitialized={isInitialized}
-              onMessage={setMessage}
-            />
+            <FheCounter onMessage={setMessage} />
 
-            <FheRatings 
-              account={account}
-              chainId={chainId}
-              isConnected={isConnected}
-              isInitialized={isInitialized}
-              onMessage={setMessage}
-            />
+            <FheRatings onMessage={setMessage} />
           </div>
         )}
       </main>

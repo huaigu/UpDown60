@@ -2,7 +2,8 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { ethers } from 'ethers';
-import { initializeFheInstance, createEncryptedInput, decryptMultipleHandles } from '../src/lib/fhevmInstance';
+import { createEncryptedInput, decryptMultipleHandles } from '../src/lib/fhevmInstance';
+import { useFhevm } from '../app/providers/FhevmProvider';
 
 // Contract ABI for SimpleVoting_uint32
 const VOTING_CONTRACT_ABI = [
@@ -241,20 +242,11 @@ interface VotingSession {
 }
 
 interface FheVotingProps {
-  account: string;
-  chainId: number;
-  isConnected: boolean;
-  isInitialized: boolean;
   onMessage: (message: string) => void;
 }
 
-const FheVoting = ({
-  account,
-  chainId,
-  isConnected,
-  isInitialized,
-  onMessage
-}: FheVotingProps) => {
+const FheVoting = ({ onMessage }: FheVotingProps) => {
+  const { address, isConnected, isInitialized, walletProvider } = useFhevm();
   const [sessions, setSessions] = useState<VotingSession[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isVoting, setIsVoting] = useState(false);
@@ -271,11 +263,11 @@ const FheVoting = ({
 
   // Load all voting sessions
   const loadSessions = useCallback(async () => {
-    if (!window.ethereum) return;
+    if (!walletProvider || !address) return;
 
     try {
       setIsLoading(true);
-      const provider = new ethers.BrowserProvider(window.ethereum);
+      const provider = new ethers.BrowserProvider(walletProvider);
       const contract = new ethers.Contract(VOTING_CONTRACT_ADDRESS, VOTING_CONTRACT_ABI, provider);
       
       const sessionCount = await contract.getSessionCount();
@@ -284,7 +276,7 @@ const FheVoting = ({
       for (let i = 0; i < Number(sessionCount); i++) {
         try {
           const sessionData = await contract.getSession(i);
-          const hasVoted = await contract.hasVoted(i, account);
+          const hasVoted = await contract.hasVoted(i, address);
           const sessionStruct = await contract.sessions(i);
           
           const session: VotingSession = {
@@ -296,7 +288,7 @@ const FheVoting = ({
             noVotes: Number(sessionData.noVotes),
             hasVoted,
             revealRequested: sessionStruct.revealRequested,
-            canRequestTally: sessionData.creator.toLowerCase() === account.toLowerCase() && 
+            canRequestTally: sessionData.creator.toLowerCase() === address.toLowerCase() && 
                            !sessionData.resolved && 
                            Date.now() / 1000 > Number(sessionData.endTime)
           };
@@ -314,24 +306,24 @@ const FheVoting = ({
     } finally {
       setIsLoading(false);
     }
-  }, [onMessage, account]);
+  }, [onMessage, address, walletProvider]);
 
-  // Load sessions on component mount and when account changes
+  // Load sessions on component mount and when address changes
   useEffect(() => {
     if (isConnected && isInitialized) {
       loadSessions();
     }
-  }, [isConnected, isInitialized, account, loadSessions]);
+  }, [isConnected, isInitialized, address, loadSessions]);
 
   // Create a new voting session
   const createSession = async () => {
-    if (!window.ethereum || !account) return;
+    if (!walletProvider || !address) return;
 
     try {
       setIsLoading(true);
       onMessage('Creating new voting session...');
       
-      const provider = new ethers.BrowserProvider(window.ethereum);
+      const provider = new ethers.BrowserProvider(walletProvider);
       const signer = await provider.getSigner();
       const contract = new ethers.Contract(VOTING_CONTRACT_ADDRESS, VOTING_CONTRACT_ABI, signer);
       
@@ -350,13 +342,13 @@ const FheVoting = ({
 
   // Cast a vote
   const castVote = async (sessionId: number, vote: 'yes' | 'no') => {
-    if (!window.ethereum || !account) return;
+    if (!walletProvider || !address) return;
 
     try {
       setIsVoting(true);
       onMessage(`Casting ${vote} vote...`);
       
-      const provider = new ethers.BrowserProvider(window.ethereum);
+      const provider = new ethers.BrowserProvider(walletProvider);
       const signer = await provider.getSigner();
       const contract = new ethers.Contract(VOTING_CONTRACT_ADDRESS, VOTING_CONTRACT_ABI, signer);
       
@@ -364,7 +356,11 @@ const FheVoting = ({
       setIsEncrypting(true);
       setEncryptError('');
       try {
-        const encryptedVote = await createEncryptedInput(VOTING_CONTRACT_ADDRESS, account, vote === 'yes' ? 1 : 0);
+        const encryptedVote = await createEncryptedInput(
+          VOTING_CONTRACT_ADDRESS,
+          address,
+          vote === 'yes' ? 1 : 0
+        );
         
         // Handle the encrypted data structure properly
         let encryptedData: any, proof: any;
@@ -414,13 +410,13 @@ const FheVoting = ({
 
   // Decrypt and submit tally (when reveal already requested)
   const decryptTally = async (sessionId: number) => {
-    if (!window.ethereum || !account) return;
+    if (!walletProvider || !address) return;
 
     try {
       setIsDecrypting(true);
       onMessage('Fetching encrypted handles...');
       
-      const provider = new ethers.BrowserProvider(window.ethereum);
+      const provider = new ethers.BrowserProvider(walletProvider);
       const signer = await provider.getSigner();
       const contract = new ethers.Contract(VOTING_CONTRACT_ADDRESS, VOTING_CONTRACT_ABI, signer);
       
@@ -485,13 +481,13 @@ const FheVoting = ({
 
   // Request tally reveal and automatically handle decryption
   const requestTallyReveal = async (sessionId: number) => {
-    if (!window.ethereum || !account) return;
+    if (!walletProvider || !address) return;
 
     try {
       setIsRequestingTally(true);
       onMessage('Requesting tally reveal...');
       
-      const provider = new ethers.BrowserProvider(window.ethereum);
+      const provider = new ethers.BrowserProvider(walletProvider);
       const signer = await provider.getSigner();
       const contract = new ethers.Contract(VOTING_CONTRACT_ADDRESS, VOTING_CONTRACT_ABI, signer);
       
@@ -579,10 +575,10 @@ const FheVoting = ({
 
   // Get final tally for a resolved session
   const getFinalTally = async (sessionId: number) => {
-    if (!window.ethereum) return;
+    if (!walletProvider) return;
 
     try {
-      const provider = new ethers.BrowserProvider(window.ethereum);
+      const provider = new ethers.BrowserProvider(walletProvider);
       const contract = new ethers.Contract(VOTING_CONTRACT_ADDRESS, VOTING_CONTRACT_ABI, provider);
       
       const sessionData = await contract.getSession(sessionId);
