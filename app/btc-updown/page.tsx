@@ -2091,7 +2091,7 @@ export default function BtcUpDownPage() {
                                         className="grid grid-cols-[auto_1fr_auto] items-center gap-2 border-2 border-neo-black bg-gray-100 px-2 py-1 rounded-md"
                                         key={event.id}
                                       >
-                                        <span className="font-mono text-[10px] text-neo-black max-w-[90px] truncate">
+                                        <span className="font-mono text-[10px] text-neo-black w-[90px] truncate">
                                           {getFeedUserLabel(event)}
                                         </span>
                                         <span className="font-display text-[10px] text-center">
