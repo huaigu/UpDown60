@@ -192,6 +192,7 @@ export default function BtcUpDownPage() {
   const [cachedAddress, setCachedAddress] = useState('');
   const [submissionsLoadedKey, setSubmissionsLoadedKey] = useState('');
   const [roundTimelinePage, setRoundTimelinePage] = useState(0);
+  const [showEmptyRounds, setShowEmptyRounds] = useState(true);
   const [expandedActivityByRound, setExpandedActivityByRound] = useState<Record<number, boolean>>({});
   const [userStats, setUserStats] = useState<{
     totalBets: number;
@@ -1288,17 +1289,22 @@ export default function BtcUpDownPage() {
         return b.lastLogIndex - a.lastLogIndex;
       });
   }, [feedEvents]);
-  const totalRoundPages = Math.ceil(roundGroups.length / ROUND_TIMELINE_PAGE_SIZE);
+  const visibleRoundGroups = useMemo(() => {
+    if (showEmptyRounds) return roundGroups;
+    return roundGroups.filter((group) => group.activity.length > 0);
+  }, [roundGroups, showEmptyRounds]);
+  const totalRoundPages = Math.ceil(visibleRoundGroups.length / ROUND_TIMELINE_PAGE_SIZE);
   const activeRoundPage = Math.min(
     roundTimelinePage,
     Math.max(totalRoundPages - 1, 0)
   );
-  const pagedRoundGroups = roundGroups.slice(
+  const pagedRoundGroups = visibleRoundGroups.slice(
     activeRoundPage * ROUND_TIMELINE_PAGE_SIZE,
     activeRoundPage * ROUND_TIMELINE_PAGE_SIZE + ROUND_TIMELINE_PAGE_SIZE
   );
   const showTimelinePagination = totalRoundPages > 1;
   const hasFeedContent = roundGroups.length > 0;
+  const hasVisibleRounds = visibleRoundGroups.length > 0;
   useEffect(() => {
     if (roundTimelinePage !== activeRoundPage) {
       setRoundTimelinePage(activeRoundPage);
@@ -1912,7 +1918,25 @@ export default function BtcUpDownPage() {
           >
             <div className="bg-secondary p-4 border-b-5 border-neo-black flex justify-between items-center">
               <h3 className="text-white font-display uppercase text-2xl tracking-wide">Live Feed</h3>
-              <div className="flex gap-2">
+              <div className="flex items-center gap-3">
+                <button
+                  className={`flex items-center gap-2 border-2 border-neo-black px-3 py-1 text-[10px] font-display uppercase shadow-neo-sm transition-all ${
+                    showEmptyRounds
+                      ? 'bg-primary text-neo-black'
+                      : 'bg-white text-neo-black hover:translate-x-[1px] hover:translate-y-[1px] hover:shadow-none'
+                  }`}
+                  onClick={() => setShowEmptyRounds((prev) => !prev)}
+                  type="button"
+                  aria-pressed={showEmptyRounds}
+                  title="Toggle empty rounds"
+                >
+                  <span
+                    className={`h-2.5 w-2.5 rounded-full border-2 border-neo-black ${
+                      showEmptyRounds ? 'bg-[#0bda0b]' : 'bg-gray-200'
+                    }`}
+                  />
+                  Empty rounds {showEmptyRounds ? 'On' : 'Off'}
+                </button>
                 <div className="w-4 h-4 bg-[#0bda0b] border-2 border-neo-black rounded-full animate-pulse" />
               </div>
             </div>
@@ -1935,51 +1959,55 @@ export default function BtcUpDownPage() {
                 <div className="p-4 text-center text-sm text-neo-black/60">{feedHint}</div>
               ) : (
                 <div className="p-4 flex flex-col gap-6">
-                  {roundGroups.length ? (
-                    <div className="flex flex-col gap-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <span className="text-xs font-display uppercase text-neo-black/60">
-                          Round Timeline
-                        </span>
-                        {showTimelinePagination ? (
-                          <div className="flex items-center gap-2 text-[10px] font-display uppercase text-neo-black/60">
-                            <button
-                              className={`border-2 border-neo-black px-2 py-1 shadow-neo-sm ${
-                                activeRoundPage === 0
-                                  ? 'bg-gray-200 text-neo-black/50 cursor-not-allowed'
-                                  : 'bg-white text-neo-black hover:translate-x-[1px] hover:translate-y-[1px] hover:shadow-none'
-                              }`}
-                              disabled={activeRoundPage === 0}
-                              onClick={() =>
-                                setRoundTimelinePage((prev) => Math.max(prev - 1, 0))
-                              }
-                              type="button"
-                            >
-                              Prev
-                            </button>
-                            <span>
-                              Page {activeRoundPage + 1}/{totalRoundPages}
-                            </span>
-                            <button
-                              className={`border-2 border-neo-black px-2 py-1 shadow-neo-sm ${
-                                activeRoundPage >= totalRoundPages - 1
-                                  ? 'bg-gray-200 text-neo-black/50 cursor-not-allowed'
-                                  : 'bg-white text-neo-black hover:translate-x-[1px] hover:translate-y-[1px] hover:shadow-none'
-                              }`}
-                              disabled={activeRoundPage >= totalRoundPages - 1}
-                              onClick={() =>
-                                setRoundTimelinePage((prev) =>
-                                  Math.min(prev + 1, totalRoundPages - 1)
-                                )
-                              }
-                              type="button"
-                            >
-                              Next
-                            </button>
-                          </div>
-                        ) : null}
+                  <div className="flex flex-col gap-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-xs font-display uppercase text-neo-black/60">
+                        Round Timeline
+                      </span>
+                      {showTimelinePagination ? (
+                        <div className="flex items-center gap-2 text-[10px] font-display uppercase text-neo-black/60">
+                          <button
+                            className={`border-2 border-neo-black px-2 py-1 shadow-neo-sm ${
+                              activeRoundPage === 0
+                                ? 'bg-gray-200 text-neo-black/50 cursor-not-allowed'
+                                : 'bg-white text-neo-black hover:translate-x-[1px] hover:translate-y-[1px] hover:shadow-none'
+                            }`}
+                            disabled={activeRoundPage === 0}
+                            onClick={() =>
+                              setRoundTimelinePage((prev) => Math.max(prev - 1, 0))
+                            }
+                            type="button"
+                          >
+                            Prev
+                          </button>
+                          <span>
+                            Page {activeRoundPage + 1}/{totalRoundPages}
+                          </span>
+                          <button
+                            className={`border-2 border-neo-black px-2 py-1 shadow-neo-sm ${
+                              activeRoundPage >= totalRoundPages - 1
+                                ? 'bg-gray-200 text-neo-black/50 cursor-not-allowed'
+                                : 'bg-white text-neo-black hover:translate-x-[1px] hover:translate-y-[1px] hover:shadow-none'
+                            }`}
+                            disabled={activeRoundPage >= totalRoundPages - 1}
+                            onClick={() =>
+                              setRoundTimelinePage((prev) =>
+                                Math.min(prev + 1, totalRoundPages - 1)
+                              )
+                            }
+                            type="button"
+                          >
+                            Next
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+                    {!hasVisibleRounds ? (
+                      <div className="border-2 border-neo-black bg-gray-100 px-3 py-4 text-center text-xs font-display uppercase text-neo-black/60 rounded-lg">
+                        No rounds with activity. Toggle "Empty rounds" to view idle rounds.
                       </div>
-                      {pagedRoundGroups.map((group, index) => {
+                    ) : (
+                      pagedRoundGroups.map((group, index) => {
                         const mergedActivity = (() => {
                           const byUser = new Map<string, FeedEvent>();
                           const unkeyed: FeedEvent[] = [];
@@ -2198,9 +2226,9 @@ export default function BtcUpDownPage() {
                           )}
                         </div>
                         );
-                      })}
-                    </div>
-                  ) : null}
+                      })
+                    )}
+                  </div>
                 </div>
               )}
             </div>
